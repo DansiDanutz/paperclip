@@ -54,6 +54,7 @@ import { IssueChatThread, type IssueChatComposerHandle } from "../components/Iss
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { IssueDocumentsSection } from "../components/IssueDocumentsSection";
 import { IssueProperties } from "../components/IssueProperties";
+import { IssueWorkProductsPanel } from "../components/IssueWorkProductsPanel";
 import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import type { MentionOption } from "../components/MarkdownEditor";
 import { ImageGalleryModal } from "../components/ImageGalleryModal";
@@ -400,6 +401,11 @@ export function IssueDetail() {
     queryKey: queryKeys.issues.detail(issueId!),
     queryFn: () => issuesApi.get(issueId!),
     enabled: !!issueId,
+  });
+  const { data: experimentalSettings } = useQuery({
+    queryKey: queryKeys.instance.experimentalSettings,
+    queryFn: () => instanceSettingsApi.getExperimental(),
+    placeholderData: keepPreviousData,
   });
   const resolvedCompanyId = issue?.companyId ?? selectedCompanyId;
   const commentComposerDisabledReason = useMemo(() => {
@@ -793,6 +799,12 @@ export function IssueDetail() {
       hasTokens,
     };
   }, [linkedRuns]);
+  const showWorkProductTab = useMemo(
+    () =>
+      experimentalSettings?.enableIsolatedWorkspaces === true ||
+      (issue?.workProducts?.length ?? 0) > 0,
+    [experimentalSettings?.enableIsolatedWorkspaces, issue?.workProducts],
+  );
 
   const invalidateIssueDetail = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId!) });
@@ -2097,6 +2109,12 @@ export function IssueDetail() {
             <MessageSquare className="h-3.5 w-3.5" />
             Chat
           </TabsTrigger>
+          {showWorkProductTab ? (
+            <TabsTrigger value="work-product" className="gap-1.5">
+              <Paperclip className="h-3.5 w-3.5" />
+              Work Product
+            </TabsTrigger>
+          ) : null}
           <TabsTrigger value="activity" className="gap-1.5">
             <ActivityIcon className="h-3.5 w-3.5" />
             Activity
@@ -2191,6 +2209,12 @@ export function IssueDetail() {
             </div>
           )}
         </TabsContent>
+
+        {showWorkProductTab ? (
+          <TabsContent value="work-product">
+            <IssueWorkProductsPanel issue={issue} />
+          </TabsContent>
+        ) : null}
 
         <TabsContent value="activity">
           {activityInitialLoading ? (
