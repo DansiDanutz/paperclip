@@ -16,6 +16,7 @@ import { usePanel } from "../context/PanelContext";
 import { useToast } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { assigneeValueFromSelection, suggestedCommentAssigneeValue } from "../lib/assignees";
+import { shouldShowIssueWorkProductTab } from "../lib/issue-work-products-tab";
 import { extractIssueTimelineEvents } from "../lib/issue-timeline-events";
 import { queryKeys } from "../lib/queryKeys";
 import {
@@ -800,10 +801,8 @@ export function IssueDetail() {
     };
   }, [linkedRuns]);
   const showWorkProductTab = useMemo(
-    () =>
-      experimentalSettings?.enableIsolatedWorkspaces === true ||
-      (issue?.workProducts?.length ?? 0) > 0,
-    [experimentalSettings?.enableIsolatedWorkspaces, issue?.workProducts],
+    () => shouldShowIssueWorkProductTab(issue, experimentalSettings?.enableIsolatedWorkspaces === true),
+    [experimentalSettings?.enableIsolatedWorkspaces, issue],
   );
 
   const invalidateIssueDetail = useCallback(() => {
