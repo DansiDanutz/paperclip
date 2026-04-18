@@ -536,7 +536,10 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
     process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "localhost",
   );
   const runtimePort = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100";
-  const apiUrl = process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`;
+  const apiUrl = (process.env.PAPERCLIP_API_URL ?? `http://${runtimeHost}:${runtimePort}`).replace(
+    /\/+$/,
+    "",
+  );
   vars.PAPERCLIP_API_URL = apiUrl;
   return vars;
 }

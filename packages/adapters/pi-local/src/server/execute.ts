@@ -32,6 +32,14 @@ const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_SESSIONS_DIR = path.join(os.homedir(), ".pi", "paperclips");
 const PI_AGENT_SKILLS_DIR = path.join(os.homedir(), ".pi", "agent", "skills");
 
+function resolveEnvBindingValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const record = parseObject(value);
+  if (!record) return null;
+  if (record.type === "plain" && typeof record.value === "string") return record.value;
+  return null;
+}
+
 function firstNonEmptyLine(text: string): string {
   return (
     text
@@ -151,8 +159,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   // Build environment
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
+  const explicitApiKey = resolveEnvBindingValue(envConfig.PAPERCLIP_API_KEY);
+  const hasExplicitApiKey = typeof explicitApiKey === "string" && explicitApiKey.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   env.PAPERCLIP_RUN_ID = runId;
   
@@ -197,7 +205,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (workspaceHints.length > 0) env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
 
   for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
+    const resolved = resolveEnvBindingValue(value);
+    if (typeof resolved === "string") env[key] = resolved;
   }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;

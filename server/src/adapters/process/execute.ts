@@ -11,6 +11,14 @@ import {
   runChildProcess,
 } from "../utils.js";
 
+function resolveEnvBindingValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const record = parseObject(value);
+  if (!record) return null;
+  if (record.type === "plain" && typeof record.value === "string") return record.value;
+  return null;
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, config, onLog, onMeta } = ctx;
   const command = asString(config.command, "");
@@ -21,7 +29,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   for (const [k, v] of Object.entries(envConfig)) {
-    if (typeof v === "string") env[k] = v;
+    const resolved = resolveEnvBindingValue(v);
+    if (typeof resolved === "string") env[k] = resolved;
   }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
   const resolvedCommand = await resolveCommandForLogs(command, cwd, runtimeEnv);

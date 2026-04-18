@@ -30,6 +30,14 @@ import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+function resolveEnvBindingValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const record = parseObject(value);
+  if (!record) return null;
+  if (record.type === "plain" && typeof record.value === "string") return record.value;
+  return null;
+}
+
 function firstNonEmptyLine(text: string): string {
   return (
     text
@@ -129,8 +137,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
 
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
+  const explicitApiKey = resolveEnvBindingValue(envConfig.PAPERCLIP_API_KEY);
+  const hasExplicitApiKey = typeof explicitApiKey === "string" && explicitApiKey.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   env.PAPERCLIP_RUN_ID = runId;
   const wakeTaskId =
@@ -173,7 +181,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (workspaceHints.length > 0) env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
 
   for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
+    const resolved = resolveEnvBindingValue(value);
+    if (typeof resolved === "string") env[key] = resolved;
   }
   // Prevent OpenCode from writing an opencode.json config file into the
   // project working directory (which would pollute the git repo).  Model

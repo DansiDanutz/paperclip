@@ -35,6 +35,14 @@ describe("buildPaperclipEnv", () => {
     expect(env.PAPERCLIP_API_URL).toBe("http://localhost:4100");
   });
 
+  it("strips a trailing slash from an explicit PAPERCLIP_API_URL", () => {
+    process.env.PAPERCLIP_API_URL = "http://localhost:4100/";
+
+    const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
+
+    expect(env.PAPERCLIP_API_URL).toBe("http://localhost:4100");
+  });
+
   it("uses runtime listen host/port when explicit URL is not set", () => {
     delete process.env.PAPERCLIP_API_URL;
     process.env.PAPERCLIP_LISTEN_HOST = "0.0.0.0";

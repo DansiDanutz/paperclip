@@ -324,7 +324,7 @@ function resolvePaperclipApiUrlOverride(value: unknown): string | null {
   try {
     const parsed = new URL(raw);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    return parsed.toString();
+    return parsed.toString().replace(/\/+$/, "");
   } catch {
     return null;
   }
@@ -1363,6 +1363,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
         const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
         if (waitStatus === "timeout") {
+          const recoveredSummary = assistantChunks.join("").trim() ||
+            extractResultText(asRecord(acceptedPayload?.result)) ||
+            extractResultText(acceptedPayload);
+          if (recoveredSummary && !lifecycleError) {
+            await ctx.onLog(
+              "stdout",
+              `[openclaw-gateway] agent.wait timed out after ${waitTimeoutMs}ms but assistant output was received; treating run as completed from stream output\n`,
+            );
+            return {
+              exitCode: 0,
+              signal: null,
+              timedOut: false,
+              provider: "openclaw",
+              resultJson: waitPayload,
+              summary: recoveredSummary,
+            };
+          }
           return {
             exitCode: 1,
             signal: null,

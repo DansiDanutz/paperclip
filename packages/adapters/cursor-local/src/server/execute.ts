@@ -45,6 +45,14 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+function resolveEnvBindingValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const record = parseObject(value);
+  if (!record) return null;
+  if (record.type === "plain" && typeof record.value === "string") return record.value;
+  return null;
+}
+
 function resolveCursorBillingType(env: Record<string, string>): "api" | "subscription" {
   return hasNonEmptyEnvValue(env, "CURSOR_API_KEY") || hasNonEmptyEnvValue(env, "OPENAI_API_KEY")
     ? "api"
@@ -194,8 +202,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
 
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
+  const explicitApiKey = resolveEnvBindingValue(envConfig.PAPERCLIP_API_KEY);
+  const hasExplicitApiKey = typeof explicitApiKey === "string" && explicitApiKey.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   env.PAPERCLIP_RUN_ID = runId;
   const wakeTaskId =
@@ -265,7 +273,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
   }
   for (const [k, v] of Object.entries(envConfig)) {
-    if (typeof v === "string") env[k] = v;
+    const resolved = resolveEnvBindingValue(v);
+    if (typeof resolved === "string") env[k] = resolved;
   }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;

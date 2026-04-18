@@ -43,6 +43,14 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
   return typeof raw === "string" && raw.trim().length > 0;
 }
 
+function resolveEnvBindingValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const record = parseObject(value);
+  if (!record) return null;
+  if (record.type === "plain" && typeof record.value === "string") return record.value;
+  return null;
+}
+
 function resolveGeminiBillingType(env: Record<string, string>): "api" | "subscription" {
   return hasNonEmptyEnvValue(env, "GEMINI_API_KEY") || hasNonEmptyEnvValue(env, "GOOGLE_API_KEY")
     ? "api"
@@ -168,8 +176,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureGeminiSkillsInjected(onLog, geminiSkillEntries, desiredGeminiSkillNames);
 
   const envConfig = parseObject(config.env);
-  const hasExplicitApiKey =
-    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
+  const explicitApiKey = resolveEnvBindingValue(envConfig.PAPERCLIP_API_KEY);
+  const hasExplicitApiKey = typeof explicitApiKey === "string" && explicitApiKey.trim().length > 0;
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   env.PAPERCLIP_RUN_ID = runId;
   const wakeTaskId =
@@ -212,7 +220,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (workspaceHints.length > 0) env.PAPERCLIP_WORKSPACES_JSON = JSON.stringify(workspaceHints);
 
   for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
+    const resolved = resolveEnvBindingValue(value);
+    if (typeof resolved === "string") env[key] = resolved;
   }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;

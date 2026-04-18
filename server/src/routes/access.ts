@@ -835,11 +835,11 @@ export function normalizeAgentDefaultsForJoin(input: {
           message: `paperclipApiUrl must use http:// or https:// (got ${parsedPaperclipApiUrl.protocol}).`
         });
       } else {
-        normalized.paperclipApiUrl = parsedPaperclipApiUrl.toString();
+        normalized.paperclipApiUrl = parsedPaperclipApiUrl.toString().replace(/\/+$/, "");
         diagnostics.push({
           code: "openclaw_gateway_paperclip_api_url_configured",
           level: "info",
-          message: `paperclipApiUrl set to ${parsedPaperclipApiUrl.toString()}`
+          message: `paperclipApiUrl set to ${normalized.paperclipApiUrl}`
         });
       }
     } catch {
