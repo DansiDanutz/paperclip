@@ -20,12 +20,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Block manual lockfile edits
-        if: github.head_ref != 'chore/refresh-lockfile'
+      - name: Validate lockfile change scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$'
+
+          lockfile_changed=false
+          manifest_changed=false
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
-            echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
+            lockfile_changed=true
+          fi
+          if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
+            manifest_changed=true
+          fi
+
+          if [ "$lockfile_changed" = true ] && [ "$manifest_changed" = false ] && [ "$HEAD_REF" != 'chore/refresh-lockfile' ]; then
+            echo "::error::pnpm-lock.yaml may change only with a dependency manifest or on chore/refresh-lockfile."
+            exit 1
+          fi
+
+          if [ "$manifest_changed" = true ] && [ "$lockfile_changed" = false ]; then
+            echo "::error::Dependency manifest changes must include the generated pnpm-lock.yaml."
             exit 1
           fi
 
@@ -81,11 +100,19 @@ jobs:
           fi
 
       - name: Validate dependency resolution when manifests change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
           manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$'
-          if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
+          if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern" || printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
             pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+            if ! git diff --quiet -- pnpm-lock.yaml; then
+              echo "::error::pnpm-lock.yaml does not match deterministic dependency resolution."
+              git diff --stat -- pnpm-lock.yaml
+              exit 1
+            fi
           fi
 
   verify:
