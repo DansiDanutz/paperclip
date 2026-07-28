@@ -1,6 +1,7 @@
 name: Docker
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - "master"
@@ -16,13 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: docker-${{ github.ref }}
+      group: docker-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Login to GitHub Container Registry
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -48,7 +50,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event_name == 'push' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
