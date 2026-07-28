@@ -17,11 +17,12 @@ Current implementation status:
 
 ## Dependency Lockfile Policy
 
-GitHub Actions owns `pnpm-lock.yaml`.
+`pnpm-lock.yaml` is generated from reviewed dependency manifests and verified by GitHub Actions.
 
-- Do not commit `pnpm-lock.yaml` in pull requests.
-- Pull request CI validates dependency resolution when manifests change.
-- Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
+- Pull requests that change dependency resolution must include `pnpm-lock.yaml` when regeneration changes it; metadata-only manifest edits do not need a synthetic lockfile change.
+- Pull request CI regenerates the lockfile with scripts disabled and rejects any checked-in result that differs. Package manifests, pnpm configuration, workspace configuration, and files under `patches/` are treated as resolution inputs.
+- Lockfile-only edits are rejected except on the dedicated `chore/refresh-lockfile` branch.
+- Pushes to `master` retain a recovery refresh that runs `pnpm install --lockfile-only --no-frozen-lockfile` and opens a pull request when the generated lockfile changes.
 
 ## Start Dev
 
