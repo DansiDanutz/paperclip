@@ -19,10 +19,10 @@ Current implementation status:
 
 `pnpm-lock.yaml` is generated from reviewed dependency manifests and verified by GitHub Actions.
 
-- Pull requests that change a dependency manifest must include the resulting `pnpm-lock.yaml`.
-- Pull request CI regenerates the lockfile with scripts disabled and rejects any checked-in result that differs.
+- Pull requests that change dependency resolution must include `pnpm-lock.yaml` when regeneration changes it; metadata-only manifest edits do not need a synthetic lockfile change.
+- Pull request CI regenerates the lockfile with scripts disabled and rejects any checked-in result that differs. Package manifests, pnpm configuration, workspace configuration, and files under `patches/` are treated as resolution inputs.
 - Lockfile-only edits are rejected except on the dedicated `chore/refresh-lockfile` branch.
-- Pushes to `master` retain a recovery refresh that runs `pnpm install --lockfile-only --no-frozen-lockfile`, commits a changed lockfile if needed, and then verifies with `--frozen-lockfile`.
+- Pushes to `master` retain a recovery refresh that runs `pnpm install --lockfile-only --no-frozen-lockfile` and opens a pull request when the generated lockfile changes.
 
 ## Start Dev
 
