@@ -8036,6 +8036,7 @@ export function issueService(db: Db) {
           assigneeUserId: null,
           checkoutRunId,
           executionRunId: checkoutRunId,
+          executionLockedAt: checkoutRunId ? now : null,
           status: "in_progress",
           startedAt: now,
           updatedAt: now,
@@ -8082,7 +8083,8 @@ export function issueService(db: Db) {
           .set({
             checkoutRunId,
             executionRunId: checkoutRunId,
-            updatedAt: new Date(),
+            executionLockedAt: now,
+            updatedAt: now,
           })
           .where(
             and(

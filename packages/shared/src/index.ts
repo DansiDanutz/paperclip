@@ -1725,6 +1725,7 @@ export {
   issueBlockedInboxStateSchema,
   updateIssueSchema,
   stalledReviewDecisionSchema,
+  reviewDecisionSchema,
   issueExecutionPolicySchema,
   issueExecutionStateSchema,
   resolveIssueRecoveryActionSchema,

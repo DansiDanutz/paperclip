@@ -709,6 +709,7 @@ export interface IssueExecutionState {
   currentStageType: IssueExecutionStageType | null;
   currentParticipant: IssueExecutionStagePrincipal | null;
   returnAssignee: IssueExecutionStagePrincipal | null;
+  reviewRoundId?: string | null;
   reviewRequest: IssueReviewRequest | null;
   completedStageIds: string[];
   lastDecisionId: string | null;
@@ -729,6 +730,9 @@ export interface IssueExecutionDecision {
   outcome: IssueExecutionDecisionOutcome;
   body: string;
   createdByRunId: string | null;
+  reviewRoundId?: string | null;
+  idempotencyKey?: string | null;
+  payloadHash?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
