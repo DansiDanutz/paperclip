@@ -117,7 +117,18 @@
         "rule": "LOCAL SAFETY: worktree instances must not share embedded database directories, migrations and destructive operations need explicit target validation and rollback, and secrets must use references rather than persisted plaintext."
       },
       {
-        "scope": ["package.json", "pnpm-workspace.yaml", "**/package.json", ".github/workflows/**"],
+        "scope": [
+          "package.json",
+          "**/package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          ".npmrc",
+          "pnpmfile.cjs",
+          "pnpmfile.js",
+          "pnpmfile.mjs",
+          "patches/**",
+          ".github/workflows/**"
+        ],
         "rule": "REPOSITORY CONTRACT: Node 20+ and pnpm 9+ remain supported. Dependency-resolution pull requests must include the deterministically regenerated pnpm-lock.yaml when it changes; lockfile-only edits are allowed only on chore/refresh-lockfile. Required typecheck, test, and build evidence must match the affected workspace."
       }
     ],
