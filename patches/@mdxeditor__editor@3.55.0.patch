@@ -1,0 +1,12 @@
+diff --git a/dist/plugins/frontmatter/FrontmatterEditor.js b/dist/plugins/frontmatter/FrontmatterEditor.js
+index 0f9c46d9ed6307b9a820533b39e760dcf5c4aecb..2ff651d81af06f8bb4171fa1da7e76acdcb8ccc6 100644
+--- a/dist/plugins/frontmatter/FrontmatterEditor.js
++++ b/dist/plugins/frontmatter/FrontmatterEditor.js
+@@ -1,6 +1,6 @@
+ import * as Dialog from "@radix-ui/react-dialog";
+ import classNames from "classnames";
+-import YamlParser from "js-yaml";
++import * as YamlParser from "js-yaml";
+ import React__default from "react";
+ import { useForm, useFieldArray } from "react-hook-form";
+ import { frontmatterDialogOpen$, removeFrontmatter$ } from "./index.js";
