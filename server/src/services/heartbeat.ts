@@ -6704,6 +6704,12 @@ export function resolveNextSessionState(input: {
 export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeService>;
 
 export interface HeartbeatServiceOptions {
+  /**
+   * Failover admission gate: when provided, it is consulted before this
+   * instance dispatches or wakes work for a company. Absent (the default),
+   * dispatch authority is unchanged — this is how the ordinary primary runs.
+   */
+  dispatchGate?: (input: { companyId: string }) => Promise<boolean>;
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
@@ -9810,6 +9816,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       message?: string;
       payload?: Record<string, unknown>;
     },
+    options: {
+      executor?: Parameters<Parameters<typeof db.transaction>[0]>[0];
+      publish?: boolean;
+    } = {},
   ) {
     const eventAt = new Date();
     const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
@@ -9831,7 +9841,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       at: eventAt,
     });
 
-    await db.insert(heartbeatRunEvents).values({
+    await (options.executor ?? db).insert(heartbeatRunEvents).values({
       companyId: run.companyId,
       runId: run.id,
       agentId: run.agentId,
@@ -9843,6 +9853,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       message: sanitizedMessage,
       payload: sanitizedPayload,
     });
+
+    if (options.publish === false) return;
 
     publishLiveEvent({
       companyId: run.companyId,
@@ -14015,6 +14027,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
+      if (options.dispatchGate && !(await options.dispatchGate({ companyId: agent.companyId }))) return [];
       const invokability = await getAgentInvokability(agent);
       if (!invokability.invokable) {
         if (shouldCancelRunsForNonInvokableAgent(invokability)) {
@@ -17117,7 +17130,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
   }
 
-  async function releaseIssueExecutionAndPromote(
+  /**
+   * Durable continuation selection for a finalized run, executed inside the
+   * caller's transaction: locks every issue that still references the run,
+   * clears that run's orphaned execution pointers, and either promotes a
+   * deferred wake, queues immediate recovery, records a blocked escalation
+   * decision, or verifies that no continuation is needed. Callers own the
+   * transaction and all post-commit publication/dispatch effects. The ordinary
+   * release path wraps this with its own transaction; the issue-interruption
+   * reconciler passes its receipt-completion transaction.
+   */
+  async function selectIssueExecutionContinuationInTransaction(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
     run: typeof heartbeatRuns.$inferSelect,
     options: { suppressImmediateRecovery?: boolean } = {},
   ) {
@@ -17135,8 +17159,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await db.transaction(async (tx) => {
-      // Lock the context issue (if any) AND every issue that still references this run.
+    // Lock the context issue (if any) AND every issue that still references this run.
       //
       // A single run can hold execution locks on multiple issues: the caller's context
       // issue (set via svc.checkout) plus any additional issues stamped by
@@ -17574,7 +17597,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           options.suppressImmediateRecovery ||
           existingReviewParticipantExecutionPath ||
           issueHasPersistedMonitor ||
-          await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)
+          await isAutomaticRecoverySuppressedByPauseHold(tx as unknown as Db, issue.companyId, issue.id, treeControlSvc)
         ) {
           return { kind: "released" as const };
         }
@@ -17702,7 +17725,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "released" as const };
       }
 
-      if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
+      if (await isAutomaticRecoverySuppressedByPauseHold(tx as unknown as Db, issue.companyId, issue.id, treeControlSvc)) {
         return { kind: "released" as const };
       }
 
@@ -17837,7 +17860,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         kind: "queued_recovery" as const,
         run: queuedRun,
       };
-    });
+  }
+
+  async function releaseIssueExecutionAndPromote(
+    run: typeof heartbeatRuns.$inferSelect,
+    options: { suppressImmediateRecovery?: boolean } = {},
+  ) {
+    const promotionResult = await db.transaction((tx) =>
+      selectIssueExecutionContinuationInTransaction(tx, run, options),
+    );
 
     if (promotionResult?.kind === "blocked") {
       await recovery.escalateStrandedAssignedIssue({
@@ -17943,6 +17974,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (schedulingSuppression.suppressed) {
       await writeSkippedHeartbeatRequest("heartbeat.scheduling_suppressed", {
         reason: schedulingSuppression.reason,
+      });
+      return null;
+    }
+    if (options.dispatchGate && !(await options.dispatchGate({ companyId: agent.companyId }))) {
+      await writeSkippedHeartbeatRequest("admission_not_admitted", {
+        reason: "instance is not the admitted dispatcher for this company",
       });
       return null;
     }
@@ -19249,23 +19286,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     eventPayload?: Record<string, unknown>;
   };
 
-  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
-    const run = await getRun(runId);
-    if (!run) throw notFound("Heartbeat run not found");
-    if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
-    const agent = await getAgent(run.agentId);
-    const errorCode = options.errorCode ?? "cancelled";
-    const resultJson = agent
-      ? {
-          ...mergeRunStopMetadataForAgent(agent, "cancelled", {
-            resultJson: parseObject(run.resultJson),
-            errorCode,
-            errorMessage: reason,
-          }),
-          ...(options.resultJson ?? {}),
-        }
-      : options.resultJson;
-
+  /**
+   * Bounded OS-level stop of the exact run's owned process group. Database state
+   * is untouched and no adapter promise, release/promotion path or queue lock is
+   * awaited, so callers can persist the run's cancellation state transactionally
+   * around this stop. An already-stopped process stays stopped even if a caller's
+   * surrounding transaction later rolls back; native stopped-process recovery
+   * handles that boundary.
+   */
+  async function stopHeartbeatRunProcess(run: typeof heartbeatRuns.$inferSelect) {
     const running = runningProcesses.get(run.id);
     try {
       if (running) {
@@ -19283,6 +19312,185 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } finally {
       runningProcesses.delete(run.id);
     }
+  }
+
+  /**
+   * Transaction-aware cancellation persistence for the composite issue
+   * interruption: conditionally terminalizes only a run still in
+   * `requiredStatus` (the status the caller observed), cancels its wakeup
+   * request and records the lifecycle event inside the caller's transaction.
+   * No live/plugin publication happens here; callers publish after commit.
+   * When the CAS matches nothing, the outcome that already won is reported so
+   * the caller can revalidate instead of overwriting it.
+   */
+  async function cancelRunInTransaction(
+    executor: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    run: typeof heartbeatRuns.$inferSelect,
+    params: CancelRunOptions & { reason: string; requiredStatus: string },
+  ) {
+    const agent = await getAgent(run.agentId);
+    const errorCode = params.errorCode ?? "cancelled";
+    const resultJson = agent
+      ? {
+          ...mergeRunStopMetadataForAgent(agent, "cancelled", {
+            resultJson: parseObject(run.resultJson),
+            errorCode,
+            errorMessage: params.reason,
+          }),
+          ...(params.resultJson ?? {}),
+        }
+      : params.resultJson;
+
+    const finishedAt = new Date();
+    const cancelled = await executor
+      .update(heartbeatRuns)
+      .set({
+        status: "cancelled",
+        finishedAt,
+        error: params.reason,
+        errorCode,
+        ...(resultJson ? { resultJson } : {}),
+        updatedAt: finishedAt,
+      })
+      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, params.requiredStatus)))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+
+    if (!cancelled) {
+      const current = await executor
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, run.id))
+        .then((rows) => rows[0] ?? null);
+      return { run: current, cancelled: false as const };
+    }
+
+    if (isHeartbeatRunTerminalStatus(cancelled.status)) {
+      clearHeartbeatRunRuntimeStatus(cancelled.id);
+    }
+
+    if (run.wakeupRequestId) {
+      await executor
+        .update(agentWakeupRequests)
+        .set({ status: "cancelled", finishedAt, error: params.reason, updatedAt: finishedAt })
+        .where(eq(agentWakeupRequests.id, run.wakeupRequestId));
+    }
+
+    await appendRunEvent(cancelled, await nextRunEventSeq(run.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: params.eventMessage ?? "run cancelled",
+      ...(params.eventPayload ? { payload: params.eventPayload } : {}),
+    }, { executor, publish: false });
+
+    return { run: cancelled, cancelled: true as const };
+  }
+
+  /**
+   * Post-commit half of a composite interruption: publishes the deferred
+   * live/plugin events for the cancelled run and its selected continuation,
+   * persists a promoted deferred-wake reopen record, finalizes agent status and
+   * lets native queue resumption start the durable work. Every step is safe to
+   * repeat; a crash in this window is covered by startup queued-run resumption.
+   */
+  async function dispatchInterruptionContinuation(
+    cancelledRun: typeof heartbeatRuns.$inferSelect,
+    continuationResult: {
+      kind: "promoted";
+      run: typeof heartbeatRuns.$inferSelect;
+      reopenedActivity: LogActivityInput | null;
+    } | {
+      kind: "queued_recovery";
+      run: typeof heartbeatRuns.$inferSelect;
+    } | null,
+  ) {
+    if (continuationResult?.kind === "promoted" && continuationResult.reopenedActivity) {
+      await logActivity(db, continuationResult.reopenedActivity);
+    }
+    publishLiveEvent({
+      companyId: cancelledRun.companyId,
+      type: "heartbeat.run.status",
+      payload: buildHeartbeatRunStatusLiveEventPayload(cancelledRun),
+    });
+    publishRunLifecyclePluginEvent(cancelledRun);
+    if (continuationResult) {
+      const continuationRun = continuationResult.run;
+      publishLiveEvent({
+        companyId: continuationRun.companyId,
+        type: "heartbeat.run.queued",
+        payload: {
+          runId: continuationRun.id,
+          agentId: continuationRun.agentId,
+          invocationSource: continuationRun.invocationSource,
+          triggerDetail: continuationRun.triggerDetail,
+          wakeupRequestId: continuationRun.wakeupRequestId,
+        },
+      });
+    }
+    await finalizeAgentStatus(cancelledRun.agentId, "cancelled", undefined, {
+      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(cancelledRun),
+    });
+    await startNextQueuedRunForAgent(cancelledRun.agentId);
+    if (continuationResult) {
+      await startNextQueuedRunForAgent(continuationResult.run.agentId);
+    }
+  }
+
+  /**
+   * Durable escalation for an interruption receipt whose continuation was
+   * verified blocked, using the same native escalation as the ordinary release
+   * path. Retrying a partially applied escalation converges because the
+   * escalated issue no longer qualifies for continuation.
+   */
+  async function escalateBlockedInterruptionContinuation(
+    promotionResult: NonNullable<Awaited<ReturnType<typeof selectIssueExecutionContinuationInTransaction>>>,
+    run: typeof heartbeatRuns.$inferSelect,
+  ) {
+    if (promotionResult.kind === "blocked") {
+      await recovery.escalateStrandedAssignedIssue({
+        issue: promotionResult.issue,
+        previousStatus: promotionResult.previousStatus as "todo" | "in_progress" | "in_review",
+        latestRun: run,
+        notice: promotionResult.notice,
+        recoveryCause:
+          promotionResult.recoveryCause === WORKSPACE_VALIDATION_RECOVERY_CAUSE
+            ? WORKSPACE_VALIDATION_RECOVERY_CAUSE
+            : promotionResult.recoveryCause === CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
+              ? CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE
+              : promotionResult.recoveryCause === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
+                ? EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
+              : undefined,
+      });
+      return;
+    }
+    if (promotionResult.kind === "blocked_recovery_in_place") {
+      await recovery.escalateStrandedRecoveryIssueInPlace({
+        issue: promotionResult.issue,
+        previousStatus: promotionResult.previousStatus as "todo" | "in_progress" | "in_review",
+        latestRun: run,
+      });
+    }
+  }
+
+  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
+    const run = await getRun(runId);
+    if (!run) throw notFound("Heartbeat run not found");
+    if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
+    const agent = await getAgent(run.agentId);
+    const errorCode = options.errorCode ?? "cancelled";
+    const resultJson = agent
+      ? {
+          ...mergeRunStopMetadataForAgent(agent, "cancelled", {
+            resultJson: parseObject(run.resultJson),
+            errorCode,
+            errorMessage: reason,
+          }),
+          ...(options.resultJson ?? {}),
+        }
+      : options.resultJson;
+
+    await stopHeartbeatRunProcess(run);
 
     const finishedAt = new Date();
     const cancelled = await setRunStatus(run.id, "cancelled", {
@@ -19710,6 +19918,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     retryScheduledRetryNow,
 
     resumeQueuedRuns,
+    startNextQueuedRunForAgent,
 
     scheduleBoundedRetry: async (
       runId: string,
@@ -19824,6 +20033,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     },
 
     cancelRun: (runId: string, reason?: string, options?: CancelRunOptions) => cancelRunInternal(runId, reason, options),
+
+    /**
+     * Building blocks for the coordinated issue-interruption composite
+     * operation. Ordinary cancellation must keep using cancelRun.
+     */
+    issueInterruption: {
+      stopRunProcess: stopHeartbeatRunProcess,
+      cancelRunInTransaction,
+      selectContinuationInTransaction: selectIssueExecutionContinuationInTransaction,
+      dispatchContinuation: dispatchInterruptionContinuation,
+      escalateBlockedContinuation: escalateBlockedInterruptionContinuation,
+    },
 
     /**
      * Pause-only. Emits errorCode "agent_paused" unconditionally; its sole caller is the

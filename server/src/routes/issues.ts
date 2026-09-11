@@ -220,6 +220,13 @@ import {
   redactIssueMonitorExternalRef,
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
+import {
+  advanceIssueReviewSnapshotAfterCheckout,
+  assertIssueReviewSnapshotCurrent,
+  captureIssueReviewSnapshot,
+  type IssueCheckoutPreparation,
+} from "../services/issue-review-snapshot.js";
+import { createIssueInterruptionService } from "../services/issue-interruption.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
@@ -2816,6 +2823,7 @@ export function issueRoutes(
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
+  const issueInterruptionsSvc = createIssueInterruptionService(db, { heartbeat });
   const enqueueStalledReviewDecisionWakeup = opts.stalledReviewDecisionEnqueueWakeup ?? heartbeat.wakeup;
   const enqueueRecoveryActionWakeup = opts.recoveryActionEnqueueWakeup ?? heartbeat.wakeup;
   const feedback = feedbackService(db);
@@ -3167,43 +3175,6 @@ export function issueRoutes(
       .where(and(eq(issueWorkProducts.id, input.artifactId), eq(issueWorkProducts.issueId, input.issueId)))
       .then((rows) => rows[0] ?? null);
     return row?.sourceTrust ?? null;
-  }
-
-  async function cancelScheduledRetrySupersededByComment(input: {
-    scheduledRetryRunId: string | null | undefined;
-    issue: { id: string; companyId: string };
-    actor: ReturnType<typeof getActorInfo>;
-  }) {
-    const scheduledRetryRunId = readNonEmptyString(input.scheduledRetryRunId);
-    if (!scheduledRetryRunId) return null;
-
-    try {
-      const cancelled = await heartbeat.cancelRun(scheduledRetryRunId);
-      const cancelledRunId = cancelled?.id ?? scheduledRetryRunId;
-      await logActivity(db, {
-        companyId: input.issue.companyId,
-        actorType: input.actor.actorType,
-        actorId: input.actor.actorId,
-        agentId: input.actor.agentId,
-        runId: input.actor.runId,
-        agentApiKeyId: input.actor.agentApiKeyId,
-        action: "heartbeat.cancelled",
-        entityType: "heartbeat_run",
-        entityId: cancelledRunId,
-        issueId: input.issue.id,
-        details: {
-          source: "issue_comment_scheduled_retry_superseded",
-          issueId: input.issue.id,
-        },
-      });
-      return cancelledRunId;
-    } catch (err) {
-      logger.error(
-        { err, issueId: input.issue.id, runId: scheduledRetryRunId },
-        "failed to cancel scheduled retry superseded by issue comment",
-      );
-      throw err;
-    }
   }
 
   async function classifySourceRecoveryRevalidation(input: {
@@ -4039,7 +4010,10 @@ export function issueRoutes(
       /** Used only to name the task in denial copy (plan §6). */
       identifier?: string | null;
     },
-    options: { allowVisibleIssueWrite?: boolean } = {},
+    options: {
+      allowVisibleIssueWrite?: boolean;
+      onCheckoutPrepared?: (preparation: IssueCheckoutPreparation) => void;
+    } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -4113,6 +4087,7 @@ export function issueRoutes(
     const runId = requireAgentRunId(req, res);
     if (!runId) return false;
     const ownership = await svc.assertCheckoutOwner(issue.id, actorAgentId, runId);
+    options.onCheckoutPrepared?.({ actorAgentId, actorRunId: runId, ownership });
     if (ownership.adoptedFromRunId) {
       const actor = getActorInfo(req);
       await logActivity(db, {
@@ -9364,8 +9339,10 @@ export function issueRoutes(
 
   router.patch("/issues/:id", validateIssueMutationBody(updateIssueRouteSchema), async (req, res) => {
     const id = req.params.id as string;
-    const existing = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    let existing = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!existing) return;
+    let expectedReviewSnapshot = captureIssueReviewSnapshot(existing);
+    const checkoutPreparation: { value: IssueCheckoutPreparation | null } = { value: null };
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     if (req.actor.type === "agent" && req.body.onBehalfOfUserId != null) {
       await auditAgentIssueCommentAttributionSpoof({
@@ -9382,9 +9359,22 @@ export function issueRoutes(
       req,
       res,
       existing,
-      { allowVisibleIssueWrite: true },
+      {
+        allowVisibleIssueWrite: true,
+        onCheckoutPrepared: (preparation) => { checkoutPreparation.value = preparation; },
+      },
     );
     if (!issueMutationAccess) return;
+    if (checkoutPreparation.value) {
+      const prepared = await svc.getById(id);
+      if (!prepared) throw notFound("Issue not found");
+      expectedReviewSnapshot = advanceIssueReviewSnapshotAfterCheckout(
+        expectedReviewSnapshot, prepared, checkoutPreparation.value,
+      );
+      // Derive all subsequent decisions from the verified native own-effect row;
+      // the original semantic/review fields were not allowed to change.
+      existing = prepared;
+    }
     const issueMutationAuthorizationReason = req.actor.type === "agent"
       ? issueWriteAuthorizationReason(req, await decideIssueAccess(req, existing, "issue:mutate"))
       : issueWriteAuthorizationReason(req, true);
@@ -9554,6 +9544,13 @@ export function issueRoutes(
       return;
     }
     let interruptedRunId: string | null = null;
+    // Composite interruption preparation. The identified run is cancelled inside
+    // the issue mutation transaction below, together with the requested edit,
+    // comment and a durable continuation receipt; native release/promotion runs
+    // only after that transaction commits.
+    const interruptCandidateRun = interruptRequested && commentBody
+      ? await resolveActiveIssueRun(existing)
+      : null;
     const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(existing);
     const isAgentWorkUpdate =
       req.actor.type === "agent" &&
@@ -9568,6 +9565,10 @@ export function issueRoutes(
       !(await assertCrossIssueInfluenceWithinRunCap(req, res, existing, "comment"))
     ) return;
 
+    let compositeInterruption: {
+      run: NonNullable<Awaited<ReturnType<typeof heartbeat.getRun>>>;
+      kind: "board_interrupt";
+    } | null = null;
     if (interruptRequested) {
       if (!commentBody) {
         res.status(400).json({ error: "Interrupt is only supported when posting a comment" });
@@ -9577,37 +9578,9 @@ export function issueRoutes(
         res.status(403).json({ error: "Only board users can interrupt active runs from issue comments" });
         return;
       }
-
-      const runToInterrupt = await resolveActiveIssueRun(existing);
-      if (runToInterrupt) {
-        const cancelled = await heartbeat.cancelRun(
-          runToInterrupt.id,
-          "Interrupted by board comment",
-          operatorInterruptCancelOptions({ issueId: existing.id, actor }),
-        );
-        if (cancelled) {
-          interruptedRunId = cancelled.id;
-          await logActivity(db, {
-            companyId: cancelled.companyId,
-            actorType: actor.actorType,
-            actorId: actor.actorId,
-            agentId: actor.agentId,
-            runId: actor.runId,
-            agentApiKeyId: actor.agentApiKeyId,
-            action: "heartbeat.cancelled",
-            entityType: "heartbeat_run",
-            entityId: cancelled.id,
-            issueId: existing.id,
-            details: {
-              agentId: cancelled.agentId,
-              source: "issue_comment_interrupt",
-              issueId: existing.id,
-              cancellationKind: "operator_interrupted",
-              operatorInterrupted: true,
-            },
-          });
-        }
-      }
+      compositeInterruption = interruptCandidateRun
+        ? { run: interruptCandidateRun, kind: "board_interrupt" }
+        : null;
     }
 
     const runToCancelForCancelledStatus = shouldCancelActiveRunForCancelledStatus
@@ -9626,16 +9599,20 @@ export function issueRoutes(
       updateFields.status = "todo";
     }
     let cancelledScheduledRetryRunId: string | null = null;
+    let compositeScheduledRetrySupersession: {
+      run: NonNullable<Awaited<ReturnType<typeof heartbeat.getRun>>>;
+      kind: "scheduled_retry_supersession";
+    } | null = null;
     if (
       commentBody &&
       shouldResumeInProgressScheduledRetry &&
       updateFields.status === "todo"
     ) {
-      cancelledScheduledRetryRunId = await cancelScheduledRetrySupersededByComment({
-        scheduledRetryRunId: scheduledRetryForHumanComment?.runId,
-        issue: existing,
-        actor,
-      });
+      const scheduledRetryRunId = scheduledRetryForHumanComment?.runId;
+      const scheduledRetryRun = scheduledRetryRunId ? await heartbeat.getRun(scheduledRetryRunId) : null;
+      if (scheduledRetryRun) {
+        compositeScheduledRetrySupersession = { run: scheduledRetryRun, kind: "scheduled_retry_supersession" };
+      }
     }
     if (req.body.executionPolicy !== undefined) {
       updateFields.executionPolicy = applyActorMonitorScheduledBy(
@@ -9846,6 +9823,19 @@ export function issueRoutes(
     };
     const shouldCollectCompletionPublication =
       actor.actorType === "user" && existing.status !== "done" && updateFields.status === "done";
+    // Even an initially unreviewed issue can gain a review path while this
+    // request prepares its mutation. Do not apply any stale derived patch.
+    const requiresCurrentIssueSnapshot = Object.keys(updateFields).length > 0;
+    // A composite interruption must take the issue lock and revalidate the full
+    // snapshot under it even when the request changes no fields, because the
+    // cancellation and receipt commit atomically with the mutation.
+    const requiresLockedSnapshotComparison =
+      requiresCurrentIssueSnapshot ||
+      compositeInterruption != null ||
+      compositeScheduledRetrySupersession != null;
+    let comment: Awaited<ReturnType<typeof svc.addComment>> | null = null;
+    let pendingInterruptionOperationId: string | null = null;
+    let lockedExistingRow: NonNullable<Awaited<ReturnType<typeof svc.getByIdForUpdate>>> | null = null;
     const updateIssue = (tx?: Parameters<typeof svc.update>[2]) => {
       if (tx) {
         return shouldCollectCompletionPublication
@@ -9861,6 +9851,7 @@ export function issueRoutes(
     ) => {
       const lockedExisting = await svc.getByIdForUpdate(id, tx);
       if (!lockedExisting) return false;
+      lockedExistingRow = lockedExisting;
       const lockedPolicyChangeRequested =
         req.body.reviewPolicy !== undefined
         && req.body.reviewPolicy !== lockedExisting.reviewPolicy;
@@ -9877,6 +9868,9 @@ export function issueRoutes(
           actor: { type: actor.actorType, id: actor.actorId },
           reviewPolicy: lockedExisting.reviewPolicy,
         });
+      }
+      if (requiresLockedSnapshotComparison) {
+        assertIssueReviewSnapshotCurrent(expectedReviewSnapshot, lockedExisting);
       }
       return true;
     };
@@ -9955,14 +9949,65 @@ export function issueRoutes(
       Boolean(decision)
       || shouldRelayStop
       || persistReviewActivityTransactionally
-      || reviewPolicySensitiveMutationRequested;
+      || reviewPolicySensitiveMutationRequested
+      || requiresCurrentIssueSnapshot
+      || compositeInterruption != null
+      || compositeScheduledRetrySupersession != null;
     try {
       if (shouldUseTransactionalIssueUpdate) {
         issue = await db.transaction(async (tx) => {
           if (
-            reviewPolicySensitiveMutationRequested
+            (reviewPolicySensitiveMutationRequested || requiresLockedSnapshotComparison)
             && !(await assertLockedReviewPolicyAllowsMutation(tx))
           ) return null;
+          const compositeCancellation = compositeInterruption ?? compositeScheduledRetrySupersession;
+          if (compositeCancellation) {
+            const lockedIssue = lockedExistingRow ?? existing;
+            const cancellation = await issueInterruptionsSvc.cancelRunForCompositeIssueUpdate(tx, {
+              issue: lockedIssue,
+              run: compositeCancellation.run,
+              kind: compositeCancellation.kind,
+              reason:
+                compositeCancellation.kind === "board_interrupt"
+                  ? "Interrupted by board comment"
+                  : "Cancelled by control plane",
+              options:
+                compositeCancellation.kind === "board_interrupt"
+                  ? operatorInterruptCancelOptions({ issueId: existing.id, actor })
+                  : {},
+            });
+            if (cancellation.cancelledRunId) {
+              if (compositeCancellation.kind === "board_interrupt") {
+                interruptedRunId = cancellation.cancelledRunId;
+              } else {
+                cancelledScheduledRetryRunId = cancellation.cancelledRunId;
+              }
+              await logActivity(tx as unknown as Db, {
+                companyId: existing.companyId,
+                actorType: actor.actorType,
+                actorId: actor.actorId,
+                agentId: actor.agentId,
+                runId: actor.runId,
+                agentApiKeyId: actor.agentApiKeyId,
+                action: "heartbeat.cancelled",
+                entityType: "heartbeat_run",
+                entityId: cancellation.cancelledRunId,
+                issueId: existing.id,
+                details: compositeCancellation.kind === "board_interrupt"
+                  ? {
+                      agentId: compositeCancellation.run.agentId,
+                      source: "issue_comment_interrupt",
+                      issueId: existing.id,
+                      cancellationKind: "operator_interrupted",
+                      operatorInterrupted: true,
+                    }
+                  : {
+                      source: "issue_comment_scheduled_retry_superseded",
+                      issueId: existing.id,
+                    },
+              }, postCommitActivityPublications);
+            }
+          }
           const updated = await updateIssue(tx);
           if (!updated) return null;
 
@@ -9986,6 +10031,34 @@ export function issueRoutes(
           }
 
           await persistReviewTransitionActivity(tx, updated);
+
+          // Only composite comments move into the transaction: the requested
+          // comment commits atomically with the cancellation it drove.
+          if (commentBody && (compositeInterruption || compositeScheduledRetrySupersession)) {
+            comment = await svc.addComment(id, commentBody, {
+              agentId: actor.agentId ?? undefined,
+              userId: actor.actorType === "user" ? actor.actorId : undefined,
+              runId: actor.runId,
+              onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+            }, {
+              authorizationReason: issueMutationAuthorizationReason,
+              sourceTrust: await sourceTrustForActorWrite(updated, actor),
+            }, tx);
+          }
+
+          const compositeCancelledRunId = compositeInterruption
+            ? interruptedRunId
+            : cancelledScheduledRetryRunId;
+          if (compositeCancelledRunId) {
+            pendingInterruptionOperationId = randomUUID();
+            await issueInterruptionsSvc.insertPendingInterruptionReceipt(tx, {
+              operationId: pendingInterruptionOperationId,
+              companyId: updated.companyId,
+              issueId: updated.id,
+              cancelledRunId: compositeCancelledRunId,
+              kind: compositeInterruption ? "board_interrupt" : "scheduled_retry_supersession",
+            });
+          }
 
           return updated;
         });
@@ -10020,6 +10093,29 @@ export function issueRoutes(
       return;
     }
     for (const publication of postCommitActivityPublications) publishActivity(publication);
+
+    if (pendingInterruptionOperationId) {
+      // The composite operation committed; complete its continuation receipt
+      // before responding. Any failure leaves the pending receipt in place for
+      // startup/periodic reconciliation — it must not fail the committed write.
+      try {
+        const completion = await issueInterruptionsSvc.completePendingInterruptions({
+          operationId: pendingInterruptionOperationId,
+          reason: "issue_update_committed",
+        });
+        if (completion.blockedPending > 0 || completion.failed > 0) {
+          logger.warn(
+            { issueId: id, operationId: pendingInterruptionOperationId, ...completion },
+            "issue interruption continuation not completed in-request; pending receipt remains reconcilable",
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { err, issueId: id, operationId: pendingInterruptionOperationId },
+          "post-commit issue interruption continuation failed; pending receipt remains reconcilable",
+        );
+      }
+    }
 
     if (enteringBlocked) {
       const blockedIssue = issue;
@@ -10415,20 +10511,21 @@ export function issueRoutes(
       }
     }
 
-    let comment = null;
     let lostReviewPathRef: string | null = null;
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      comment = await svc.addComment(id, commentBody, {
-        agentId: actor.agentId ?? undefined,
-        userId: actor.actorType === "user" ? actor.actorId : undefined,
-        runId: actor.runId,
-        onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-      }, {
-        authorizationReason: issueMutationAuthorizationReason,
-        sourceTrust: await sourceTrustForActorWrite(issue, actor),
-      });
+      if (!comment) {
+        comment = await svc.addComment(id, commentBody, {
+          agentId: actor.agentId ?? undefined,
+          userId: actor.actorType === "user" ? actor.actorId : undefined,
+          runId: actor.runId,
+          onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+        }, {
+          authorizationReason: issueMutationAuthorizationReason,
+          sourceTrust: await sourceTrustForActorWrite(issue, actor),
+        });
+      }
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
       const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
@@ -12285,19 +12382,56 @@ export function issueRoutes(
 
     let scheduledRetrySupersededByComment = false;
     let cancelledScheduledRetryRunId: string | null = null;
+    let pendingSupersessionOperationId: string | null = null;
     if (
       effectiveMoveToTodoRequested &&
       (isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers) || shouldResumeInProgressScheduledRetry)
     ) {
       scheduledRetrySupersededByComment = shouldResumeInProgressScheduledRetry && issue.status === "in_progress";
-      cancelledScheduledRetryRunId = scheduledRetrySupersededByComment
-        ? await cancelScheduledRetrySupersededByComment({
-            scheduledRetryRunId: scheduledRetryForHumanComment?.runId,
-            issue,
-            actor,
-          })
+      const supersessionRun = scheduledRetrySupersededByComment && scheduledRetryForHumanComment?.runId
+        ? await heartbeat.getRun(scheduledRetryForHumanComment.runId)
         : null;
-      const reopenedIssue = await svc.update(id, { status: "todo" });
+      let reopenedIssue: Awaited<ReturnType<typeof svc.update>>;
+      if (supersessionRun) {
+        // Composite supersession: revalidate the full snapshot under the issue
+        // lock BEFORE any physical cancellation, then cancel the exact
+        // scheduled retry, persist the todo transition and the continuation
+        // receipt atomically; native continuation is completed after the
+        // transaction against the resulting issue state.
+        const composite = await db.transaction(async (tx) => {
+          const lockedIssue = await svc.getByIdForUpdate(id, tx);
+          if (!lockedIssue) {
+            res.status(404).json({ error: "Issue not found" });
+            return null;
+          }
+          assertIssueReviewSnapshotCurrent(captureIssueReviewSnapshot(issue), lockedIssue);
+          const cancellation = await issueInterruptionsSvc.cancelRunForCompositeIssueUpdate(tx, {
+            issue: lockedIssue,
+            run: supersessionRun,
+            kind: "scheduled_retry_supersession",
+            reason: "Cancelled by control plane",
+            options: {},
+          });
+          let operationId: string | null = null;
+          if (cancellation.cancelledRunId) {
+            operationId = randomUUID();
+            await issueInterruptionsSvc.insertPendingInterruptionReceipt(tx, {
+              operationId,
+              companyId: issue.companyId,
+              issueId: issue.id,
+              cancelledRunId: cancellation.cancelledRunId,
+              kind: "scheduled_retry_supersession",
+            });
+          }
+          return { cancellation, operationId, updated: await svc.update(id, { status: "todo" }, tx) };
+        });
+        if (!composite) return;
+        cancelledScheduledRetryRunId = composite.cancellation.cancelledRunId;
+        pendingSupersessionOperationId = composite.operationId;
+        reopenedIssue = composite.updated;
+      } else {
+        reopenedIssue = await svc.update(id, { status: "todo" });
+      }
       if (!reopenedIssue) {
         res.status(404).json({ error: "Issue not found" });
         return;
@@ -12305,6 +12439,22 @@ export function issueRoutes(
       reopened = isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers);
       reopenFromStatus = reopened ? issue.status : null;
       currentIssue = reopenedIssue;
+
+      if (cancelledScheduledRetryRunId) {
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action: "heartbeat.cancelled",
+          entityType: "heartbeat_run",
+          entityId: cancelledScheduledRetryRunId,
+          issueId: issue.id,
+          details: { source: "issue_comment_scheduled_retry_superseded", issueId: issue.id },
+        });
+      }
 
       await logActivity(db, {
         companyId: currentIssue.companyId,
@@ -12331,6 +12481,20 @@ export function issueRoutes(
           identifier: currentIssue.identifier,
         },
       });
+
+      if (pendingSupersessionOperationId) {
+        try {
+          await issueInterruptionsSvc.completePendingInterruptions({
+            operationId: pendingSupersessionOperationId,
+            reason: "comment_supersession_committed",
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId: id, operationId: pendingSupersessionOperationId },
+            "comment supersession continuation failed; pending receipt remains reconcilable",
+          );
+        }
+      }
     }
 
     if (interruptRequested) {
@@ -12384,6 +12548,7 @@ export function issueRoutes(
     // comment is inserted would leave an orphan comment without the corresponding state change.
     let comment: Awaited<ReturnType<typeof svc.addComment>>;
     if (shouldAutoApproveReviewComment) {
+      const expectedReviewSnapshot = captureIssueReviewSnapshot(currentIssue);
       const transition = applyIssueExecutionPolicyTransition({
         issue: currentIssue,
         policy: currentExecutionPolicy,
@@ -12426,6 +12591,16 @@ export function issueRoutes(
       const postCommitActivityPublications: ActivityPublication[] = [];
       try {
         txResult = await db.transaction(async (tx) => {
+          const lockedIssue = await svc.getByIdForUpdate(id, tx);
+          if (!lockedIssue) throw new AutoApprovalIssueMissingError();
+          if (lockedIssue.reviewPolicy != null && lockedIssue.reviewPolicy !== "anyone") {
+            await assertIssueReviewVerdictActorAllowed(tx as unknown as Db, {
+              issue: lockedIssue,
+              actor: { type: actor.actorType, id: actor.actorId },
+              reviewPolicy: lockedIssue.reviewPolicy,
+            });
+          }
+          assertIssueReviewSnapshotCurrent(expectedReviewSnapshot, lockedIssue);
           const insertedComment = await svc.addComment(
             id,
             req.body.body,

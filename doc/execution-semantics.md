@@ -88,6 +88,32 @@ Execution work is paused because the next move belongs to a reviewer or approver
 
 An external review service can also be a valid review path when the issue keeps an agent assignee and has an active one-shot monitor that will wake that assignee to check the service later.
 
+Issue PATCH mutations and comment-triggered execution-stage approvals bind their
+prepared transition to the persisted issue snapshot. Before writing, they acquire
+the native issue row lock and compare the full persisted row, including raw
+execution policy/state, participants, task text, monitor fields and ownership.
+Hydrated labels and other read projections are not part of this snapshot. Current
+restrictive review-policy authorization remains independently enforced.
+
+Native checkout repair and an operator's requested run cancellation can themselves
+change execution-lock bookkeeping before that final transaction. PATCH advances
+its snapshot only after a successful native ownership check matches the exact
+caller run, or after pointers to the specific cancelled run have been cleared.
+The read-back must preserve every original policy, state, assignee, task and
+monitor field. A replacement/promoted run is not accepted as cancellation cleanup.
+Preparation after checkout uses the verified row, and the final full-row lock
+comparison still rejects later changes. This is not a general timestamp or
+execution-field exemption. An operator cancellation remains a separate committed
+action even when subsequent semantic drift makes the requested issue edit fail.
+
+A changed snapshot returns `409` with code `execution_review_snapshot_changed`;
+the caller must read the issue again and deliberately resubmit. This conservative
+check can also conflict on an unrelated persisted issue edit. It does not silently
+approve a different stage, retry against new authority, or downgrade a stale
+approval comment into an ordinary comment. Ordinary non-approval comments retain
+their existing behavior. This issue-row guarantee does not make external policy
+rows, pre-transaction operator actions, or post-commit wake delivery atomic.
+
 ### `done`
 
 The work is complete and terminal.
@@ -835,3 +861,57 @@ For a board operator, the intended meaning is:
 - blockers explain waiting
 
 That is the execution contract Paperclip should present to operators.
+
+## 16. Coordinated Issue Interruptions
+
+When a board operator interrupts a live run through an issue comment (with or
+without field edits), or supersedes an in-progress scheduled retry by
+commenting, the operation is a single composite: the exact run's cancellation,
+the requested issue mutation, the accompanying comment, the attributable
+cancellation audit/event records, and a durable continuation receipt commit
+together or not at all.
+
+Key properties:
+
+- The full review snapshot is revalidated under the issue lock before any
+  physical termination. A concurrent edit, review change, or replacement of the
+  execution authority still rejects the whole request with the exact
+  `execution_review_snapshot_changed` conflict and cancels nothing.
+- Only the identified run is conditionally terminalized, using the status the
+  request observed. If the run reached a terminal outcome first, that outcome
+  wins and is preserved; the request proceeds without cancellation. A scheduled
+  retry that already became active refuses supersession and requires explicit
+  revalidation instead of being silently treated as still scheduled.
+- The run's OS process group is stopped through the existing bounded
+  termination primitive while the transaction is open. Termination is an
+  irreversible external effect: if persistence fails afterwards, the database
+  rolls back and native stopped-process recovery handles the still-running row.
+- The receipt (`issue_interruptions`, migration 0231) records the pending
+  continuation the server owes the issue. After commit, native
+  release/promotion runs against the resulting current issue stage/assignee:
+  deferred wakes are promoted, immediate recovery is queued, a verified no-op
+  is recorded, or the receipt stays pending behind a durable escalation. The
+  selected continuation is recorded in the receipt in the same transaction that
+  consumes it, so repeated or concurrent reconcilers cannot select a second
+  replacement.
+- A crash after commit but before continuation leaves a pending receipt.
+  Startup and periodic reconciliation completes pending receipts before
+  ordinary continuation/queued resumption. While heartbeat scheduling is
+  suppressed, pending receipts stay untouched and inspectable; no automatic
+  wall-clock completion is promised.
+- Ordinary standalone `cancelRun` (agent pause, budget pause, non-invokable
+  agents, issue moved to cancelled status) keeps its existing semantics,
+  including its stand-down behavior. The receipt mechanism never promotes
+  adapter output or request metadata into server authority and never applies an
+  old request body against replacement state.
+
+## 17. Failover Admission and Conditional Stale Recovery
+
+A standby instance dispatches or wakes company work only while it holds a live,
+policy-admitted dispatch epoch; primary recovery invalidates that epoch and the
+monotonic epoch counter bars superseded authority. Unknown primary health never
+means down, and admission transitions never interrupt running work. Conditional
+stale reset is separately disabled: it fires only under a complete policy,
+strictly beyond the approved 2× heartbeat anchor, and never for live runs,
+external blockers, scheduled-retry waits, pause holds, or incomplete owner/
+reviewer/goal governance. See doc/FAILOVER-ADMISSION.md.

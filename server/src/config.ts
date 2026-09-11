@@ -85,6 +85,8 @@ export interface Config {
   feedbackExportBackendUrl: string | undefined;
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
+  standbyModeEnabled: boolean;
+  standbyInstanceId: string | null;
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
@@ -347,6 +349,8 @@ export function loadConfig(): Config {
     feedbackExportBackendUrl,
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
+    standbyModeEnabled: process.env.PAPERCLIP_STANDBY_MODE === "true",
+    standbyInstanceId: process.env.PAPERCLIP_STANDBY_INSTANCE_ID ?? null,
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,

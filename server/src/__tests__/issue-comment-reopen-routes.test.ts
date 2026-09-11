@@ -23,12 +23,26 @@ const mockAccessService = vi.hoisted(() => ({
   hasPermission: vi.fn(),
 }));
 
+const mockCancelRunInTransaction = vi.hoisted(() => vi.fn(async (_tx: unknown, run: { id: string; companyId: string; agentId: string; status: string }) => ({
+  run: { ...run, status: "cancelled" },
+  cancelled: true as const,
+})));
+const mockStopRunProcess = vi.hoisted(() => vi.fn(async () => undefined));
+
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
   getActiveRunForAgent: vi.fn(async () => null),
   cancelRun: vi.fn(async () => null),
+  resolveSchedulingSuppression: vi.fn(async () => ({ suppressed: false, reason: null })),
+  issueInterruption: {
+    stopRunProcess: mockStopRunProcess,
+    cancelRunInTransaction: mockCancelRunInTransaction,
+    selectContinuationInTransaction: vi.fn(async () => null),
+    dispatchContinuation: vi.fn(async () => undefined),
+    escalateBlockedContinuation: vi.fn(async () => undefined),
+  },
 }));
 
 const mockAgentService = vi.hoisted(() => ({
@@ -469,6 +483,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      mockTx,
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -501,6 +516,7 @@ describe.sequential("issue comment reopen routes", () => {
       expect.objectContaining({
         assigneeAgentId: "33333333-3333-4333-8333-333333333333",
       }),
+      mockTx,
     );
   });
 
@@ -546,6 +562,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      mockTx,
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -860,6 +877,7 @@ describe.sequential("issue comment reopen routes", () => {
         assigneeAgentId: otherAgentId,
         status: "todo",
       }),
+      mockTx,
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -927,16 +945,17 @@ describe.sequential("issue comment reopen routes", () => {
       error: null,
       errorCode: null,
     });
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(issue));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...issue,
       ...patch,
       updatedAt: new Date(),
     }));
-    mockHeartbeatService.cancelRun.mockResolvedValue({
+    mockHeartbeatService.getRun.mockResolvedValue({
       id: "retry-run-1",
       companyId: "company-1",
       agentId: "22222222-2222-4222-8222-222222222222",
-      status: "cancelled",
+      status: "scheduled_retry",
     });
 
     const res = await request(await installActor(createApp()))
@@ -947,8 +966,14 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      mockTx,
     );
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
+    expect(mockHeartbeatService.getRun).toHaveBeenCalledWith("retry-run-1");
+    expect(mockCancelRunInTransaction).toHaveBeenCalledWith(
+      mockTx,
+      expect.objectContaining({ id: "retry-run-1", status: "scheduled_retry" }),
+      expect.objectContaining({ reason: "Cancelled by control plane", requiredStatus: "scheduled_retry" }),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -995,14 +1020,26 @@ describe.sequential("issue comment reopen routes", () => {
       error: null,
       errorCode: null,
     });
-    mockHeartbeatService.cancelRun.mockRejectedValue(new Error("cancel failed"));
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(issue));
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "retry-run-1",
+      companyId: "company-1",
+      agentId: "22222222-2222-4222-8222-222222222222",
+      status: "scheduled_retry",
+    });
+    mockStopRunProcess.mockRejectedValueOnce(new Error("cancel failed"));
 
     const res = await request(await installActor(createApp()))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "I added the missing detail; please continue." });
 
     expect(res.status).toBe(500);
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
+    expect(mockCancelRunInTransaction).toHaveBeenCalledWith(
+      mockTx,
+      expect.objectContaining({ id: "retry-run-1", status: "scheduled_retry" }),
+      expect.objectContaining({ reason: "Cancelled by control plane", requiredStatus: "scheduled_retry" }),
+    );
+    expect(mockStopRunProcess).toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalledWith(
@@ -1524,6 +1561,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      mockTx,
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1542,8 +1580,14 @@ describe.sequential("issue comment reopen routes", () => {
     const issue = {
       ...makeIssue("in_progress"),
       executionRunId: "retry-run-1",
+      checkoutRunId: "retry-run-1",
+      executionAgentNameKey: "retry-worker",
+      executionLockedAt: new Date("2026-05-18T13:59:00Z"),
+      updatedAt: new Date("2026-05-18T13:59:00Z"),
     };
-    mockIssueService.getById.mockResolvedValue(issue);
+    let persisted: Record<string, unknown> = structuredClone(issue);
+    mockIssueService.getById.mockImplementation(async () => structuredClone(persisted));
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(persisted));
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue({
       runId: "retry-run-1",
       status: "scheduled_retry",
@@ -1557,15 +1601,15 @@ describe.sequential("issue comment reopen routes", () => {
       errorCode: null,
     });
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-      ...issue,
+      ...persisted,
       ...patch,
       updatedAt: new Date(),
     }));
-    mockHeartbeatService.cancelRun.mockResolvedValue({
+    mockHeartbeatService.getRun.mockResolvedValue({
       id: "retry-run-1",
       companyId: "company-1",
       agentId: "22222222-2222-4222-8222-222222222222",
-      status: "cancelled",
+      status: "scheduled_retry",
     });
 
     const res = await request(await installActor(createApp()))
@@ -1580,8 +1624,14 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      mockTx,
     );
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
+    expect(mockHeartbeatService.getRun).toHaveBeenCalledWith("retry-run-1");
+    expect(mockCancelRunInTransaction).toHaveBeenCalledWith(
+      mockTx,
+      expect.objectContaining({ id: "retry-run-1", status: "scheduled_retry" }),
+      expect.objectContaining({ reason: "Cancelled by control plane", requiredStatus: "scheduled_retry" }),
+    );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
@@ -1612,14 +1662,26 @@ describe.sequential("issue comment reopen routes", () => {
       error: null,
       errorCode: null,
     });
-    mockHeartbeatService.cancelRun.mockRejectedValue(new Error("cancel failed"));
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(issue));
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "retry-run-1",
+      companyId: "company-1",
+      agentId: "22222222-2222-4222-8222-222222222222",
+      status: "scheduled_retry",
+    });
+    mockStopRunProcess.mockRejectedValueOnce(new Error("cancel failed"));
 
     const res = await request(await installActor(createApp()))
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
       .send({ comment: "Retry window is over; please continue." });
 
     expect(res.status).toBe(500);
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
+    expect(mockCancelRunInTransaction).toHaveBeenCalledWith(
+      mockTx,
+      expect.objectContaining({ id: "retry-run-1", status: "scheduled_retry" }),
+      expect.objectContaining({ reason: "Cancelled by control plane", requiredStatus: "scheduled_retry" }),
+    );
+    expect(mockStopRunProcess).toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalledWith(
@@ -1872,6 +1934,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: "22222222-2222-4222-8222-222222222222",
         actorUserId: null,
       }),
+      mockTx,
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -2267,14 +2330,79 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
+  it.each(["owner", "reviewer", "policy", "foreign run"])(
+    "does not accept concurrent semantic drift during native cancellation: %s",
+    async (variant) => {
+      const workerId = "22222222-2222-4222-8222-222222222222";
+      const reviewerId = "33333333-3333-4333-8333-333333333333";
+      const policy = await normalizePolicy({
+        stages: [{
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "review",
+          participants: [{ type: "agent", agentId: reviewerId }],
+        }],
+      });
+      if (!policy) throw new Error("Review fixture must have a policy");
+      const issue = {
+        ...makeIssue("todo"), executionPolicy: policy, executionState: null,
+        executionRunId: "run-1", checkoutRunId: "run-1", executionAgentNameKey: "interrupt-worker",
+        executionLockedAt: new Date("2026-09-09T10:00:00Z"), updatedAt: new Date("2026-09-09T10:00:00Z"),
+      };
+      let persisted: Record<string, unknown> = structuredClone(issue);
+      mockIssueService.getById.mockImplementation(async () => structuredClone(persisted));
+      mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(persisted));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...persisted, ...patch }));
+      mockHeartbeatService.getRun.mockResolvedValue({
+        id: "run-1", companyId: issue.companyId, agentId: workerId, status: "running",
+      });
+      // The concurrent semantic drift commits after the route's initial read
+      // but before the composite transaction takes the issue lock, so the
+      // locked row differs from the prepared snapshot.
+      mockIssueService.getByIdForUpdate.mockImplementation(async () => {
+        const semanticChange = variant === "owner"
+          ? { assigneeAgentId: reviewerId }
+          : variant === "reviewer"
+            ? { executionPolicy: { ...policy, stages: [{ ...policy.stages[0], participants: [{ type: "user", userId: "new-human-reviewer" }] }] } }
+            : variant === "foreign run"
+              ? { checkoutRunId: "new-run-2", executionRunId: "new-run-2", executionAgentNameKey: "new-worker", executionLockedAt: new Date("2026-09-09T10:00:02Z") }
+              : { executionPolicy: { ...policy, maxReviewRounds: 1 } };
+        return {
+          ...structuredClone(persisted),
+          updatedAt: new Date("2026-09-09T10:00:01Z"),
+          ...semanticChange,
+        };
+      });
+
+      const res = await request(await installActor(createApp()))
+        .patch(`/api/issues/${issue.id}`)
+        .send({ title: "Updated task", comment: "Interrupt and update", interrupt: true });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ details: { code: "execution_review_snapshot_changed" } });
+      // Drift is rejected before any physical cancellation or persistence.
+      expect(mockCancelRunInTransaction).not.toHaveBeenCalled();
+      expect(mockStopRunProcess).not.toHaveBeenCalled();
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockTxInsert).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+      expect(mockLogActivity).not.toHaveBeenCalled();
+    },
+  );
+
   it("interrupts an active run before a combined comment update", async () => {
     const issue = {
       ...makeIssue("todo"),
       executionRunId: "run-1",
+      checkoutRunId: "run-1",
+      executionAgentNameKey: "interrupt-worker",
+      executionLockedAt: new Date("2026-09-09T10:00:00Z"),
+      updatedAt: new Date("2026-09-09T10:00:00Z"),
     };
-    mockIssueService.getById.mockResolvedValue(issue);
+    let persisted: Record<string, unknown> = structuredClone(issue);
+    mockIssueService.getById.mockImplementation(async () => structuredClone(persisted));
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(persisted));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-      ...issue,
+      ...persisted,
       ...patch,
     }));
     mockHeartbeatService.getRun.mockResolvedValue({
@@ -2283,12 +2411,6 @@ describe.sequential("issue comment reopen routes", () => {
       agentId: "22222222-2222-4222-8222-222222222222",
       status: "running",
     });
-    mockHeartbeatService.cancelRun.mockResolvedValue({
-      id: "run-1",
-      companyId: "company-1",
-      agentId: "22222222-2222-4222-8222-222222222222",
-      status: "cancelled",
-    });
 
     const res = await request(await installActor(createApp()))
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
@@ -2296,10 +2418,12 @@ describe.sequential("issue comment reopen routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockHeartbeatService.getRun).toHaveBeenCalledWith("run-1");
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
-      "run-1",
-      "Interrupted by board comment",
+    expect(mockCancelRunInTransaction).toHaveBeenCalledWith(
+      mockTx,
+      expect.objectContaining({ id: "run-1", status: "running" }),
       expect.objectContaining({
+        reason: "Interrupted by board comment",
+        requiredStatus: "running",
         errorCode: "operator_interrupted",
         resultJson: expect.objectContaining({
           operatorInterrupted: true,
@@ -2313,6 +2437,7 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
     );
+    expect(mockStopRunProcess).toHaveBeenCalledWith(expect.objectContaining({ id: "run-1" }));
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -2324,6 +2449,7 @@ describe.sequential("issue comment reopen routes", () => {
           operatorInterrupted: true,
         }),
       }),
+      expect.anything(),
     );
   });
 
@@ -2461,6 +2587,92 @@ describe.sequential("issue comment reopen routes", () => {
         body: "Approved for ship",
       }),
     );
+  });
+
+  it.each([
+    "participant",
+    "raw policy metadata",
+    "raw state metadata",
+    "monitor",
+    "task text",
+    "owner",
+  ])("rejects stale comment auto-approval before writes: %s", async (variant) => {
+    const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
+    const workerAgentId = "22222222-2222-4222-8222-222222222222";
+    const policy = await normalizePolicy({
+      stages: [{
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        type: "review",
+        participants: [{ type: "agent", agentId: reviewerAgentId }],
+      }],
+    });
+    if (!policy) throw new Error("Review fixture must have a policy");
+    const pendingState = {
+      status: "pending",
+      currentStageId: policy.stages[0].id,
+      currentStageIndex: 0,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerAgentId, userId: null },
+      returnAssignee: { type: "agent", agentId: workerAgentId, userId: null },
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null,
+    };
+    const issue = {
+      ...makeIssue("todo"),
+      status: "in_review",
+      reviewPolicy: "anyone",
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      description: "Original bounded task",
+      executionPolicy: policy,
+      executionState: pendingState,
+      monitorNotes: null,
+    };
+    const locked = (() => {
+      switch (variant) {
+        case "participant":
+          return { ...issue, executionState: { ...pendingState, currentParticipant: { type: "user", userId: "human-reviewer", agentId: null } } };
+        case "raw policy metadata":
+          return { ...issue, executionPolicy: { ...policy, additionalAuthority: { revision: 2 } } };
+        case "raw state metadata":
+          return { ...issue, executionState: { ...pendingState, reviewRoundId: "new-round" } };
+        case "monitor":
+          return { ...issue, monitorNotes: "New external evidence required" };
+        case "task text":
+          return { ...issue, description: "A different task now requires review" };
+        case "owner":
+          return { ...issue, assigneeAgentId: workerAgentId };
+        default:
+          throw new Error("Unknown fixture variant");
+      }
+    })();
+    const reviewBody = "## Review: PAP-580 - APPROVED\n\nLooks good.";
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.getByIdForUpdate.mockResolvedValue(locked);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-stale-review", issueId: issue.id, companyId: issue.companyId,
+      body: reviewBody, createdAt: new Date(), updatedAt: new Date(),
+      authorAgentId: reviewerAgentId, authorUserId: null,
+    });
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch, changes: {} }));
+
+    const res = await request(await installActor(createApp(), {
+      type: "agent", agentId: reviewerAgentId, companyId: issue.companyId,
+      source: "agent_key", runId: "run-stale-review",
+    }))
+      .post(`/api/issues/${issue.id}/comments`)
+      .send({ body: reviewBody });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ details: { code: "execution_review_snapshot_changed" } });
+    expect(mockIssueService.getByIdForUpdate).toHaveBeenCalled();
+    expect(mockIssueService.getByIdForUpdate.mock.calls[0]?.[1]).toBe(mockTx);
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockTxInsert).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("auto-approves a reviewer comment with the APPROVED review marker", async () => {
@@ -3410,8 +3622,17 @@ describe.sequential("issue comment reopen routes", () => {
       assigneeAgentId: "22222222-2222-4222-8222-222222222222",
       executionPolicy: policy,
       executionState: null,
+      checkoutRunId: "run-1",
+      executionRunId: "run-1",
+      executionLockedAt: new Date("2026-09-09T10:00:00Z"),
+      updatedAt: new Date("2026-09-09T10:00:00Z"),
     };
     mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.assertCheckoutOwner.mockResolvedValue({
+      id: issue.id, status: issue.status, assigneeAgentId: issue.assigneeAgentId,
+      checkoutRunId: issue.checkoutRunId, executionRunId: issue.executionRunId,
+      adoptedFromRunId: null,
+    });
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...issue,
       ...patch,

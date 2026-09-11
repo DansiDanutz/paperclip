@@ -53,10 +53,13 @@ const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
 })));
 const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
+const mockReviewDecisionValues = vi.hoisted(() => vi.fn(async () => undefined));
+const mockReviewDecisionInsert = vi.hoisted(() => vi.fn(() => ({ values: mockReviewDecisionValues })));
+const mockReviewTx = vi.hoisted(() => ({ select: mockDbSelect, insert: mockReviewDecisionInsert }));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
-  transaction: vi.fn(async (callback: (tx: { select: typeof mockDbSelect }) => Promise<unknown>) =>
-    callback({ select: mockDbSelect })),
+  transaction: vi.fn(async (callback: (tx: typeof mockReviewTx) => Promise<unknown>) =>
+    callback(mockReviewTx)),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
@@ -250,6 +253,194 @@ describe("issue execution policy routes", () => {
       };
     });
     mockAccessService.hasPermission.mockResolvedValue(false);
+  });
+
+  it.each(["title", "review entry", "concurrent owner", "concurrent policy"])(
+    "handles native checkout self-repair without accepting semantic drift: %s",
+    async (variant) => {
+      const agentId = "33333333-3333-4333-8333-333333333333";
+      const reviewerId = "44444444-4444-4444-8444-444444444444";
+      const runId = "55555555-5555-4555-8555-555555555555";
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [{
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          type: "review",
+          participants: [{ type: "agent", agentId: reviewerId }],
+        }],
+      })!;
+      const issue = {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        companyId: "company-1", status: "in_progress", identifier: "PAP-1002",
+        title: "Original task", assigneeAgentId: agentId, assigneeUserId: null,
+        createdByUserId: "local-board", responsibleUserId: "local-board", parentId: null,
+        executionPolicy: policy, executionState: null,
+        checkoutRunId: null, executionRunId: null, executionAgentNameKey: null,
+        executionLockedAt: null, updatedAt: new Date("2026-09-09T10:00:00Z"),
+      };
+      let persisted: Record<string, unknown> = structuredClone(issue);
+      mockIssueService.getById.mockImplementation(async () => structuredClone(persisted));
+      mockIssueService.getByIdForUpdate.mockImplementation(async () => structuredClone(persisted));
+      mockIssueService.assertCheckoutOwner.mockImplementation(async () => {
+        persisted = {
+          ...persisted,
+          checkoutRunId: runId, executionRunId: runId,
+          executionLockedAt: new Date("2026-09-09T10:00:01Z"),
+          updatedAt: new Date("2026-09-09T10:00:01Z"),
+          ...(variant === "concurrent owner" ? { assigneeAgentId: reviewerId } : {}),
+          ...(variant === "concurrent policy" ? { executionPolicy: { ...policy, maxReviewRounds: 1 } } : {}),
+        };
+        return {
+          id: issue.id, status: issue.status, assigneeAgentId: agentId,
+          checkoutRunId: runId, executionRunId: runId, adoptedFromRunId: null,
+        };
+      });
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => {
+        persisted = { ...persisted, ...patch };
+        return { ...persisted, changes: {} };
+      });
+
+      const res = await request(await createApp({ type: "agent", agentId, companyId: issue.companyId, runId }))
+        .patch(`/api/issues/${issue.id}`)
+        .send(variant === "review entry" ? { status: "in_review" } : { title: "Updated task" });
+
+      expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(issue.id, agentId, runId);
+      if (variant.startsWith("concurrent")) {
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ details: { code: "execution_review_snapshot_changed" } });
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+        expect(mockReviewDecisionInsert).not.toHaveBeenCalled();
+        expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+      } else {
+        expect(res.status).toBe(200);
+        expect(mockIssueService.getByIdForUpdate).toHaveBeenCalled();
+        expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+        expect(mockIssueService.update.mock.calls[0]?.[2]).toBe(mockReviewTx);
+        expect(persisted.executionPolicy).toEqual(policy);
+        if (variant === "title") {
+          expect(res.body).toMatchObject({ title: "Updated task", status: "in_progress", assigneeAgentId: agentId });
+          expect(persisted.checkoutRunId).toBe(runId);
+          expect(persisted.executionRunId).toBe(runId);
+        } else {
+          expect(res.body).toMatchObject({
+            status: "in_review", assigneeAgentId: reviewerId,
+            executionState: { status: "pending", currentParticipant: { type: "agent", agentId: reviewerId } },
+          });
+        }
+      }
+    },
+  );
+
+  it.each([
+    "participant",
+    "raw policy metadata",
+    "raw state metadata",
+    "monitor",
+    "task text",
+    "owner",
+    "changes requested",
+    "initially unreviewed",
+  ])("rejects a stale locked execution-review snapshot: %s", async (variant) => {
+    const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
+    const workerAgentId = "22222222-2222-4222-8222-222222222222";
+    const policy = normalizeIssueExecutionPolicy({
+      stages: [{
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        type: "review",
+        participants: [{ id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", type: "agent", agentId: reviewerAgentId }],
+      }],
+    })!;
+    const pendingState = {
+      status: "pending",
+      currentStageId: policy.stages[0].id,
+      currentStageIndex: 0,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewerAgentId, userId: null },
+      returnAssignee: { type: "agent", agentId: workerAgentId, userId: null },
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null,
+    };
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: variant === "initially unreviewed" ? "in_progress" : "in_review",
+      ...(variant === "initially unreviewed" ? {
+        checkoutRunId: "55555555-5555-4555-8555-555555555555",
+        executionRunId: "55555555-5555-4555-8555-555555555555",
+        executionLockedAt: new Date("2026-09-09T10:00:00Z"),
+        updatedAt: new Date("2026-09-09T10:00:00Z"),
+      } : {}),
+      reviewPolicy: "anyone",
+      assigneeAgentId: reviewerAgentId,
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      responsibleUserId: "local-board",
+      parentId: null,
+      identifier: "PAP-1002",
+      title: "Review the original task",
+      description: "Original bounded task",
+      executionPolicy: variant === "initially unreviewed" ? null : policy,
+      executionState: variant === "initially unreviewed" ? null : pendingState,
+      monitorNextCheckAt: null,
+      monitorWakeRequestedAt: null,
+      monitorLastTriggeredAt: null,
+      monitorAttemptCount: 0,
+      monitorNotes: null,
+      monitorScheduledBy: null,
+    };
+    const locked = (() => {
+      switch (variant) {
+        case "participant":
+        case "changes requested":
+          return { ...issue, executionState: { ...pendingState, currentParticipant: { type: "user", userId: "human-reviewer", agentId: null } } };
+        case "raw policy metadata":
+          return { ...issue, executionPolicy: { ...policy, additionalAuthority: { revision: 2 } } };
+        case "raw state metadata":
+          return { ...issue, executionState: { ...pendingState, reviewRoundId: "new-round" } };
+        case "monitor":
+          return { ...issue, monitorNotes: "New external evidence required" };
+        case "task text":
+          return { ...issue, description: "A different task now requires review" };
+        case "owner":
+          return { ...issue, assigneeAgentId: workerAgentId };
+        case "initially unreviewed":
+          return { ...issue, status: "in_review", executionPolicy: policy, executionState: pendingState };
+        default:
+          throw new Error("Unknown fixture variant");
+      }
+    })();
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.getByIdForUpdate.mockResolvedValue(locked);
+    if (variant === "initially unreviewed") {
+      mockIssueService.assertCheckoutOwner.mockResolvedValue({
+        id: issue.id, status: issue.status, assigneeAgentId: reviewerAgentId,
+        checkoutRunId: issue.checkoutRunId, executionRunId: issue.executionRunId,
+        adoptedFromRunId: null,
+      });
+    }
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch, changes: {} }));
+    mockIssueService.addComment.mockResolvedValue({
+      id: "review-comment", companyId: issue.companyId, issueId: issue.id,
+      body: "Reviewed original task", authorAgentId: reviewerAgentId, authorUserId: null,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+
+    const res = await request(await createApp({
+      type: "agent", agentId: reviewerAgentId, companyId: issue.companyId,
+      runId: "55555555-5555-4555-8555-555555555555",
+    }))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ status: variant === "changes requested" ? "in_progress" : "done", comment: "Reviewed original task" });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ details: { code: "execution_review_snapshot_changed" } });
+    expect(mockIssueService.getByIdForUpdate).toHaveBeenCalled();
+    expect(mockIssueService.getByIdForUpdate.mock.calls[0]?.[1]).toBe(mockReviewTx);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockReviewDecisionInsert).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("reauthorizes a terminal verdict against the review policy held under the update lock", async () => {
@@ -1010,6 +1201,7 @@ describe("issue execution policy routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      mockReviewTx,
     );
     const updatePatch = mockIssueService.update.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(updatePatch.status).toBeUndefined();

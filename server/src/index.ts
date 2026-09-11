@@ -68,6 +68,8 @@ import {
   toolAccessService,
   workspaceOperationService,
 } from "./services/index.js";
+import { createIssueInterruptionService } from "./services/issue-interruption.js";
+import { createFailoverAdmissionService } from "./services/admission.js";
 import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "./services/secret-proposals.js";
@@ -833,8 +835,20 @@ export async function startServer(): Promise<StartedServer> {
     telemetry: createDuplexAggregateByteLedgerTelemetry(duplexAggregateByteLedgerMetricSink),
   });
   const pluginWorkerManager = createPluginWorkerManager({ duplexAggregateByteLedger });
+  // Standby instances (failover admission lane) dispatch only across a live,
+  // policy-admitted company epoch; the default primary stays ungated.
+  const failoverAdmission = config.standbyModeEnabled
+    ? createFailoverAdmissionService(db as any)
+    : null;
   const heartbeat = config.heartbeatSchedulerEnabled
-    ? heartbeatService(db as any, { pluginWorkerManager, duplexAggregateByteLedger })
+    ? heartbeatService(db as any, {
+        pluginWorkerManager,
+        duplexAggregateByteLedger,
+        dispatchGate: config.standbyModeEnabled
+          ? ({ companyId }) =>
+              failoverAdmission!.isDispatchAllowed(companyId, config.standbyInstanceId ?? "unknown-standby")
+          : undefined,
+      })
     : null;
   const decisionServiceOptions = {
     wakeOriginAgent: createDecisionWakeOriginAgent(heartbeat?.wakeup ?? null),
@@ -1162,6 +1176,7 @@ export async function startServer(): Promise<StartedServer> {
   });
 
   if (heartbeat) {
+    const issueInterruptions = createIssueInterruptionService(db as any, { heartbeat });
     const secretProposals = createSecretProposalsService(db as any);
     const decisionExecutor = decisionService(db as any, decisionServiceOptions);
     const retentionExecutor = decisionRetentionService(db as any, {
@@ -1349,6 +1364,20 @@ export async function startServer(): Promise<StartedServer> {
           }
         }
 
+        // Finish continuations a committed issue interruption left pending
+        // BEFORE ordinary continuation/queued resumption, so a restart cannot
+        // strand the operator's committed cancellation work.
+        const interruptionReconciled = await issueInterruptions.reconcilePendingInterruptions();
+        if (
+          interruptionReconciled.completed > 0 ||
+          interruptionReconciled.blockedPending > 0 ||
+          interruptionReconciled.failed > 0
+        ) {
+          logger.warn(
+            { ...interruptionReconciled },
+            "startup issue-interruption reconciliation changed pending continuation state",
+          );
+        }
         const promotion = await heartbeat.promoteDueScheduledRetries();
         await heartbeat.resumeQueuedRuns();
         const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
@@ -1485,6 +1514,15 @@ export async function startServer(): Promise<StartedServer> {
             })
             .catch((err) => {
               logger.error({ err }, "heartbeat timer tick failed");
+            }));
+          trackHeartbeatSchedulerWork(issueInterruptions.reconcilePendingInterruptions()
+            .then((result) => {
+              if (result.completed > 0 || result.failed > 0) {
+                logger.info({ ...result }, "periodic issue-interruption reconciliation completed pending continuations");
+              }
+            })
+            .catch((err) => {
+              logger.error({ err }, "periodic issue-interruption reconciliation failed");
             }));
         }
 

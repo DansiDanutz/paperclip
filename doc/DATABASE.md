@@ -315,3 +315,51 @@ pnpm secrets:migrate-inline-env --apply
 ```
 
 Hosted AWS provider notes live in [SECRETS-AWS-PROVIDER.md](./SECRETS-AWS-PROVIDER.md).
+
+## Issue interruption continuation receipts
+
+The `issue_interruptions` table (migration `0231_issue_interruption_continuations`)
+is the durable record of a coordinated operator interruption: a board interrupt
+with an accompanying issue edit/comment, or a scheduled-retry supersession. A
+row is created only inside the composite transaction that also commits the
+exact run cancellation, the requested issue mutation, and the accompanying
+comment, so a pending row always represents continuation work the server owes
+the issue — never a queued HTTP replay.
+
+Ownership and constraints:
+
+- One receipt per complete `(company_id, issue_id, cancelled_run_id)` tuple.
+  Company/issue linkage is enforced structurally by a compound foreign key to
+  the verified `issues_company_id_uq` identity; the cancelled and selected
+  continuation runs are referenced by primary key.
+- Every FK cascades from the receipt to its issue, company and both run
+  parents, so a pending receipt can never block an already-authorized
+  issue/company deletion; deletion itself dispatches no work.
+- Database checks restrict `kind`, `state` and `outcome`, pair `pending` with
+  no recorded outcome, and require the continuation run exactly when the
+  recorded outcome selects one. Adapter output, request bodies, comment
+  contents and credentials are never stored here.
+
+Crash semantics:
+
+- Crash after the composite commit but before continuation leaves a pending
+  receipt; startup and periodic reconciliation completes it against the
+  current committed issue state.
+- Crash during continuation persistence rolls back atomically and leaves the
+  receipt pending; a repeated reconciler cannot select a second replacement
+  because the receipt is claimed with `FOR UPDATE SKIP LOCKED` and consumed in
+  the same transaction that records the selected continuation.
+- Crash after continuation persistence but before dispatch leaves a completed
+  receipt and durable queued work; native queued-run resumption drives it.
+- While heartbeat scheduling is suppressed, reconciliation stands down and
+  pending receipts remain inspectable.
+
+## Failover admission policies and dispatch epochs
+
+`company_failover_policies` (one typed policy row per company, migration
+`0232_failover_admission`) and `company_dispatch_epochs` (at most one live epoch
+per company, partial unique index) implement disabled-by-default failover
+admission. Both cascade to the company. An epoch is the single durable
+dispatcher authority: claimed via SKIP-LOCKED-style transactions, renewed only
+by its owner, invalidated by primary recovery, and expiring by policy TTL. See
+[FAILOVER-ADMISSION.md](./FAILOVER-ADMISSION.md).
