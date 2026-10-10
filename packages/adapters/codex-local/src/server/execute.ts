@@ -37,6 +37,7 @@ import {
   buildPaperclipEnv,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
+  resolveAdapterExecutionCwd,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   refreshPaperclipWorkspaceEnvForExecution,
@@ -632,7 +633,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveWorkspaceCwd = targetWorkspaceRealization?.mode === "in_place"
     ? targetWorkspaceRealization.authoritativeRoot
     : useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
-  const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
+  const cwd = asString(context.escalationCwd, "").trim()
+    ? resolveAdapterExecutionCwd({ config, context, fallbackCwd: process.cwd() })
+    : (effectiveWorkspaceCwd || configuredCwd || process.cwd());
   const envConfig = parseObject(config.env);
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   let configuredCodexHome =

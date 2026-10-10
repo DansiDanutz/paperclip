@@ -35,6 +35,7 @@ import {
   joinPromptSections,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
+  resolveAdapterExecutionCwd,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   refreshPaperclipWorkspaceEnvForExecution,
@@ -257,7 +258,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const configuredCwd = asString(config.cwd, "");
   const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
-  const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
+  const cwd = asString(context.escalationCwd, "").trim()
+    ? resolveAdapterExecutionCwd({ config, context, fallbackCwd: process.cwd() })
+    : (effectiveWorkspaceCwd || configuredCwd || process.cwd());
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
 

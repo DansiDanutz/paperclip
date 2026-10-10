@@ -38,6 +38,7 @@ import {
   joinPromptSections,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
+  resolveAdapterExecutionCwd,
   ensurePathInEnv,
   isForbiddenConfigEnvKey,
   isPaperclipRuntimeEnvKey,
@@ -202,7 +203,9 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   const configuredCwd = asString(config.cwd, "");
   const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
-  const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
+  const cwd = asString(context.escalationCwd, "").trim()
+    ? resolveAdapterExecutionCwd({ config, context, fallbackCwd: process.cwd() })
+    : (effectiveWorkspaceCwd || configuredCwd || process.cwd());
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   const shapedWorkspaceEnv = shapePaperclipWorkspaceEnvForExecution({

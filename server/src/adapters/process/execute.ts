@@ -2,6 +2,7 @@ import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.j
 import {
   asString,
   asNumber,
+  asBoolean,
   asStringArray,
   parseObject,
   buildPaperclipEnv,
@@ -14,13 +15,42 @@ import {
   runChildProcess,
 } from "../utils.js";
 
+const ESCALATION_PROMPT_ARG = "{escalationPrompt}";
+
+/**
+ * Replaces `{escalationPrompt}` with the proposal text.
+ * An empty prompt drops the token and a preceding `-p`, `--single`, or `--prompt`.
+ */
+export function applyEscalationPromptArg(args: string[], prompt: string): string[] {
+  const next: string[] = [];
+  for (const arg of args) {
+    if (arg !== ESCALATION_PROMPT_ARG) {
+      next.push(arg);
+      continue;
+    }
+    if (!prompt) {
+      const previous = next[next.length - 1];
+      if (previous === "-p" || previous === "--single" || previous === "--prompt") next.pop();
+      continue;
+    }
+    next.push(prompt);
+  }
+  return next;
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, config, onLog, onMeta, authToken } = ctx;
+  const { runId, agent, config, context, onLog, onMeta, authToken } = ctx;
   const command = asString(config.command, "");
   if (!command) throw new Error("Process adapter missing command");
 
-  const args = asStringArray(config.args);
-  const cwd = asString(config.cwd, process.cwd());
+  const wakeContext = parseObject(context);
+  const escalationPrompt = asString(wakeContext.escalationPrompt, "");
+  const args = applyEscalationPromptArg(asStringArray(config.args), escalationPrompt);
+  const escalationCwd = asString(wakeContext.escalationCwd, "").trim();
+  const cwd = escalationCwd || asString(config.cwd, process.cwd());
+  const stdin = asBoolean(config.passWakePromptOnStdin, false) && escalationPrompt
+    ? escalationPrompt
+    : undefined;
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = {
     ...buildPaperclipEnv(agent),
@@ -69,6 +99,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     graceSec,
     onLog,
     onSpawn: ctx.onSpawn,
+    stdin,
   });
 
   if (proc.timedOut) {
