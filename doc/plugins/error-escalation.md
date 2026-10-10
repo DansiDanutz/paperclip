@@ -65,13 +65,13 @@ Dan approves with the **Approve** button (confirm dialog) or a thread reply that
 
 ## Proposal agents
 
-These CLI flags are defaults to set on the four proposal agents. They were **not** executed on Dan's Mac from the environment that added this plugin. A dirty git worktree is discarded after the run, which is the backstop if a flag does not actually disable tools.
+These CLI flags were checked against `--help` on Dan's Mac. Their runtime behavior has not been exercised. A dirty git worktree is still discarded after the run.
 
-| Harness | Command Dan has installed | Suggested adapter settings |
+| Harness | Command | Adapter settings |
 | --- | --- | --- |
-| Claude Code | `claude` | Claude local adapter. `dangerouslySkipPermissions: false`. `extraArgs`: `--permission-mode`, `plan` |
-| Codex | `codex` | Codex local adapter. Leave bypass-approvals-and-sandbox off. `extraArgs`: `-s`, `read-only` |
-| Grok Build | `~/.grok/bin/grok` | Process adapter. `command`: `~/.grok/bin/grok`. `passWakePromptOnStdin: true`. No confirmed no-tools flag. Do not send this traffic to the xAI API |
-| Kimi | `~/.kimi-code/bin/kimi` (`kimi-cli` also exists) | Process adapter. `command`: `~/.kimi-code/bin/kimi`. `passWakePromptOnStdin: true`. No confirmed read-only flag |
+| Claude Code | `claude` | Claude local adapter. `dangerouslySkipPermissions: false`. `extraArgs`: `--permission-mode`, `plan`. `--permission-mode` exists, so `plan` stays. |
+| Codex | `codex exec` | Codex local adapter. The adapter already adds `exec`. Leave bypass-approvals-and-sandbox off. `extraArgs`: `-s`, `read-only`. `exec -s`/`--sandbox` accepts `read-only`. |
+| Grok Build | `~/.grok/bin/grok -p <prompt> --permission-mode plan` | Process adapter. `command`: `~/.grok/bin/grok`. `args`: `-p`, `{escalationPrompt}`, `--permission-mode`, `plan`. Leave `passWakePromptOnStdin` off. `--permission-mode` accepts `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, and `plan`. `-p`/`--single` is single-turn and prints then exits. `--disallowed-tools` and a flag to disable web search and fetch exist; they are not part of this default. Do not send this traffic to the xAI API. |
+| Kimi | `~/.kimi-code/bin/kimi -p <prompt> --plan` | Process adapter. `command`: `~/.kimi-code/bin/kimi` (`kimi-cli` also exists). `args`: `-p`, `{escalationPrompt}`, `--plan`. Leave `passWakePromptOnStdin` off. `-p`/`--prompt` is non-interactive. Never pass `-y` or `--yolo`. |
 
-`passWakePromptOnStdin` is off unless the process agent sets it, so existing process agents are unchanged. The plugin does not spawn `grok` or `kimi` itself.
+`{escalationPrompt}` is replaced with the proposal text when the process adapter runs. `passWakePromptOnStdin` stays off unless a process agent sets it, so existing process agents are unchanged. The plugin does not spawn `grok` or `kimi` itself.

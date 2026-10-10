@@ -13,10 +13,10 @@ Adapter: process
 
 Core fields:
 - command (string, required): command to execute
-- args (string[] | string, optional): command arguments
+- args (string[] | string, optional): command arguments. The exact argument \`{escalationPrompt}\` is replaced with the heartbeat escalation prompt. A preceding \`-p\`, \`--single\`, or \`--prompt\` is dropped with it when that prompt is empty.
 - cwd (string, optional): absolute working directory
 - env (object, optional): KEY=VALUE environment variables
-- passWakePromptOnStdin (boolean, optional): write the heartbeat escalation prompt to stdin. Used by proposal-only process agents such as grok and kimi. Leave unset for existing process agents.
+- passWakePromptOnStdin (boolean, optional): write the heartbeat escalation prompt to stdin. Leave unset for existing process agents. Grok and Kimi proposal agents pass the prompt with \`-p\` instead.
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds

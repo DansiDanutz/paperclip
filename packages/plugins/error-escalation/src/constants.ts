@@ -13,38 +13,50 @@ export const SLACK_APPROVE_ACTION = "error_escalation_approve";
 export const SLACK_REJECT_ACTION = "error_escalation_reject";
 export const SLACK_REJECT_CALLBACK = "error_escalation_reject_modal";
 
+/** Exact argv token the process adapter replaces with the escalation prompt. */
+export const ESCALATION_PROMPT_ARG = "{escalationPrompt}";
+
 /**
- * CLI flags Dan can set on the proposal agents.
- * They were not verified against the binaries on Dan's Mac from this environment.
+ * CLI defaults for the four proposal agents.
+ * Flag names were checked against `--help` on Dan's Mac. The commands have not been run.
  * A dirty git worktree still discards a proposal.
  */
-export const UNVERIFIED_CLI_DEFAULTS = {
+export const PROPOSAL_CLI_DEFAULTS = {
   claude_local: {
     command: "claude",
     dangerouslySkipPermissions: false,
     extraArgs: ["--permission-mode", "plan"],
-    note: "Unverified: Claude Code plan mode was not executed on Dan's Mac from this environment.",
+    helpVerified: true,
+    runtimeExercised: false,
+    note: "Verified from claude --help: --permission-mode exists, so plan stays the default. Runtime behavior has not been exercised.",
   },
   codex_local: {
     command: "codex",
     dangerouslyBypassApprovalsAndSandbox: false,
     extraArgs: ["-s", "read-only"],
-    note: "Unverified: Codex read-only sandbox was not executed on Dan's Mac from this environment.",
+    helpVerified: true,
+    runtimeExercised: false,
+    note: "Verified from codex help: exec -s/--sandbox accepts read-only. The Codex adapter already supplies exec. Runtime behavior has not been exercised.",
   },
   grok_build: {
     command: "grok",
     installedPath: "~/.grok/bin/grok",
-    extraArgs: [] as string[],
-    passWakePromptOnStdin: true,
-    note: "Unverified: the grok binary at ~/.grok/bin/grok has no confirmed no-tools flag. Do not send this traffic to the xAI API.",
+    args: ["-p", ESCALATION_PROMPT_ARG, "--permission-mode", "plan"],
+    passWakePromptOnStdin: false,
+    helpVerified: true,
+    runtimeExercised: false,
+    note: "Verified from ~/.grok/bin/grok --help. Default is grok -p <prompt> --permission-mode plan. --permission-mode accepts default, acceptEdits, auto, dontAsk, bypassPermissions, and plan. --disallowed-tools and a flag to disable web search and fetch also exist and are not part of this default. -p/--single is single-turn and prints then exits. Runtime behavior has not been exercised. Do not send this traffic to the xAI API.",
   },
   kimi: {
     command: "kimi",
     installedPath: "~/.kimi-code/bin/kimi",
     alternateCommand: "kimi-cli",
-    extraArgs: [] as string[],
-    passWakePromptOnStdin: true,
-    note: "Unverified: ~/.kimi-code/bin/kimi (kimi-cli also exists) has no confirmed read-only flag.",
+    args: ["-p", ESCALATION_PROMPT_ARG, "--plan"],
+    forbiddenArgs: ["-y", "--yolo"],
+    passWakePromptOnStdin: false,
+    helpVerified: true,
+    runtimeExercised: false,
+    note: "Verified from ~/.kimi-code/bin/kimi --help. Default is kimi -p <prompt> --plan. -p/--prompt is non-interactive. Never pass -y or --yolo. Runtime behavior has not been exercised.",
   },
 } as const;
 

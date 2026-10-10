@@ -81,6 +81,6 @@ export function buildProposalPrompt(failure: RunActivity, harness: string): stri
     failure.stdoutExcerpt ?? "(none)",
     "Last stderr:",
     failure.stderrExcerpt ?? "(none)",
-    "Read-only CLI flags for this harness are unverified. The dirty-tree check will discard your proposal if the workspace changes.",
+    "Read-only CLI flags were confirmed from --help and have not been exercised at runtime. The dirty-tree check will discard your proposal if the workspace changes.",
   ].join("\n");
 }
