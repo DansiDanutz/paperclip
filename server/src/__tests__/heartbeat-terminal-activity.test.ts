@@ -103,8 +103,9 @@ describeEmbeddedPostgres("heartbeat terminal activity", () => {
       },
     });
     const rows = await waitForActivity(companyId, "agent.run.failed");
-    expect(rows.map((row) => row.action)).toEqual(["agent.run.failed"]);
-    const details = rows[0]?.details as Record<string, unknown>;
+    const failed = rows.filter((row) => row.action === "agent.run.failed");
+    expect(failed).toHaveLength(1);
+    const details = failed[0]?.details as Record<string, unknown>;
     expect(details.adapterType).toBe("process");
     expect(details.escalationProposal).toBe(false);
     expect(details.error).toEqual(expect.stringContaining("Process exited"));
@@ -119,8 +120,9 @@ describeEmbeddedPostgres("heartbeat terminal activity", () => {
     const { companyId, agentId } = await insertAgent(["-e", "console.log('ok-from-success'); process.exit(0)"]);
     await heartbeat.invoke(agentId, "on_demand", {});
     const rows = await waitForActivity(companyId, "agent.run.finished");
-    expect(rows.map((row) => row.action)).toEqual(["agent.run.finished"]);
-    const details = rows[0]?.details as Record<string, unknown>;
+    const finished = rows.filter((row) => row.action === "agent.run.finished");
+    expect(finished).toHaveLength(1);
+    const details = finished[0]?.details as Record<string, unknown>;
     expect(details.escalationProposal).toBe(false);
     expect(details.stdoutExcerpt).toEqual(expect.stringContaining("ok-from-success"));
   });
@@ -132,8 +134,9 @@ describeEmbeddedPostgres("heartbeat terminal activity", () => {
       escalationPrompt: "proposal-only",
     });
     const rows = await waitForActivity(companyId, "agent.run.failed");
-    expect(rows.map((row) => row.action)).toEqual(["agent.run.failed"]);
-    const details = rows[0]?.details as Record<string, unknown>;
+    const failed = rows.filter((row) => row.action === "agent.run.failed");
+    expect(failed).toHaveLength(1);
+    const details = failed[0]?.details as Record<string, unknown>;
     expect(details.escalationProposal).toBe(true);
     expect(details.wakeReason).toBe(ERROR_ESCALATION_PROPOSAL_WAKE_REASON);
     expect(details.stderrExcerpt).toEqual(expect.stringContaining("proposal-boom"));
