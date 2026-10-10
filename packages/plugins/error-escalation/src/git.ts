@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -89,12 +89,65 @@ export type ProposalWorktree =
   | { ok: true; path: string; head: string; porcelain: string }
   | { ok: false; error: string };
 
+const DIFF_MAX_BUFFER = 64 * 1024 * 1024;
+
+async function gitApply(cwd: string, patch: Buffer | string): Promise<void> {
+  if (!patch || (typeof patch === "string" ? patch.length === 0 : patch.length === 0)) return;
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("git", ["apply", "--binary", "--whitespace=nowarn", "-"], { cwd });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `git apply exited ${code}`));
+    });
+    child.stdin.end(patch);
+  });
+}
+
+function safeRelative(rel: string): boolean {
+  if (!rel || path.isAbsolute(rel)) return false;
+  const normalized = path.normalize(rel);
+  return normalized !== ".." && !normalized.startsWith(`..${path.sep}`);
+}
+
+/**
+ * Copy the source checkout's uncommitted files into a detached worktree.
+ * Reads only: `git diff` and file copies. The source index and worktree stay
+ * as they were. The caller snapshots porcelain after this returns.
+ */
+async function materializeSourceSnapshot(sourceCwd: string, destination: string): Promise<void> {
+  const { stdout: patch } = await execFileAsync("git", ["diff", "--binary", "HEAD"], {
+    cwd: sourceCwd,
+    maxBuffer: DIFF_MAX_BUFFER,
+    encoding: "buffer",
+  });
+  await gitApply(destination, patch);
+
+  const { stdout: untracked } = await execFileAsync(
+    "git",
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    { cwd: sourceCwd, maxBuffer: DIFF_MAX_BUFFER },
+  );
+  for (const rel of untracked.split("\0")) {
+    if (!safeRelative(rel)) continue;
+    const from = path.join(sourceCwd, rel);
+    const to = path.join(destination, rel);
+    await mkdir(path.dirname(to), { recursive: true });
+    await cp(from, to, { dereference: false });
+  }
+}
+
 export async function createProposalWorktree(sourceCwd: string): Promise<ProposalWorktree> {
   let destination = "";
   try {
     const parent = await mkdtemp(path.join(tmpdir(), "paperclip-escalation-"));
     destination = path.join(parent, "worktree");
     await execFileAsync("git", ["worktree", "add", "--detach", destination], { cwd: sourceCwd });
+    await materializeSourceSnapshot(sourceCwd, destination);
     const head = await readHead(destination);
     const porcelain = await readPorcelain(destination);
     if (!head.ok || !porcelain.ok) {

@@ -66,6 +66,7 @@ export interface TerminalRunActivityDetails {
   repoRef: string | null;
   branchName: string | null;
   cwd: string | null;
+  executionCwd: string | null;
 }
 
 export function buildTerminalRunActivityDetails(input: {
@@ -102,5 +103,6 @@ export function buildTerminalRunActivityDetails(input: {
     repoRef: readNonEmptyString(workspace.repoRef),
     branchName: readNonEmptyString(workspace.branchName),
     cwd: readNonEmptyString(workspace.cwd),
+    executionCwd: readNonEmptyString(context.paperclipExecutionCwd),
   };
 }

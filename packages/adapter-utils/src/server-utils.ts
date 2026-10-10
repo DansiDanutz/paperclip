@@ -653,6 +653,33 @@ async function resolveSpawnTarget(
   return { command: executable, args };
 }
 
+/**
+ * Directory a local adapter process should start in.
+ *
+ * A proposal wake supplies `context.escalationCwd` and a `git_worktree`
+ * workspace. Those win over the agent's configured `cwd`. Otherwise an
+ * `agent_home` workspace still defers to that configured folder.
+ */
+export function resolveAdapterExecutionCwd(input: {
+  config: Record<string, unknown>;
+  context: Record<string, unknown>;
+  fallbackCwd?: string;
+}): string {
+  const escalationCwd = asString(input.context.escalationCwd, "").trim();
+  if (escalationCwd) return escalationCwd;
+
+  const workspace = parseObject(input.context.paperclipWorkspace);
+  const workspaceCwd = asString(workspace.cwd, "").trim();
+  const workspaceSource = asString(workspace.source, "");
+  const workspaceStrategy = asString(workspace.strategy, "");
+  const configuredCwd = asString(input.config.cwd, "").trim();
+  if (workspaceStrategy === "git_worktree" && workspaceCwd) return workspaceCwd;
+
+  const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
+  const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
+  return effectiveWorkspaceCwd || configuredCwd || input.fallbackCwd || process.cwd();
+}
+
 export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
   if (typeof env.Path === "string" && env.Path.length > 0) return env;

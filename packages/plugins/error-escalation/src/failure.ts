@@ -18,6 +18,7 @@ export interface RunActivity {
   repoRef: string | null;
   branchName: string | null;
   cwd: string | null;
+  executionCwd: string | null;
   eventType: string;
 }
 
@@ -56,6 +57,7 @@ export function parseRunActivity(event: {
     repoRef: text(payload.repoRef),
     branchName: text(payload.branchName),
     cwd: text(payload.cwd),
+    executionCwd: text(payload.executionCwd),
     eventType: event.eventType ?? "",
   };
 }

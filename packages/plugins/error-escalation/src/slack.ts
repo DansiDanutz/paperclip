@@ -258,7 +258,7 @@ export async function postEscalationMessage(input: {
   channel: string;
   record: EscalationRecord;
 }): Promise<SlackMessageRef> {
-  const message = buildApprovalMessage(input.record, input.record.status === "awaiting_approval");
+  const message = buildApprovalMessage(input.record, input.record.judge != null);
   const payload = await slackApi(input.transport, input.token, "chat.postMessage", {
     channel: input.channel,
     text: message.text,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import { parseEscalationConfig } from "./config.js";
 import { PROPOSAL_WAKE_REASON } from "./constants.js";
@@ -169,10 +170,18 @@ function slot(adapterType: string, agentId: string | null, status: ProposalSlot[
   };
 }
 
+function fanoutReadyToJudge(record: EscalationRecord): boolean {
+  return record.status === "fanning_out"
+    && record.candidates.length > 0
+    && record.proposals.length >= record.candidates.length
+    && !record.proposals.some((proposal) => proposal.status === "pending");
+}
+
 function needsResume(record: EscalationRecord): boolean {
   return record.proposals.some((proposal) => proposal.status === "pending")
     || record.status === "judging"
-    || (record.status === "failed" && record.delivery?.retryable === true);
+    || (record.status === "failed" && record.delivery?.retryable === true)
+    || fanoutReadyToJudge(record);
 }
 
 async function syncPending(ctx: PluginContext, record: EscalationRecord): Promise<void> {
@@ -241,7 +250,18 @@ function armTimeout(ctx: PluginContext, record: EscalationRecord, deps: Pipeline
   });
 }
 
-async function isolationVerdict(deps: PipelineDeps, proposal: ProposalSlot) {
+function samePath(left: string, right: string): boolean {
+  return path.resolve(left) === path.resolve(right);
+}
+
+async function isolationVerdict(deps: PipelineDeps, proposal: ProposalSlot, activity: RunActivity) {
+  if (
+    proposal.worktreePath
+    && activity.executionCwd
+    && !samePath(activity.executionCwd, proposal.worktreePath)
+  ) {
+    return { dirty: true, error: "Proposal ran outside the isolated worktree" };
+  }
   if (!proposal.worktreePath) return { dirty: true, error: "Proposal worktree is missing" };
   const current = await deps.readPorcelain(proposal.worktreePath);
   const head = await deps.readHead(proposal.worktreePath);
@@ -268,7 +288,7 @@ async function applyProposal(ctx: PluginContext, activity: RunActivity, deps: Pi
       proposal.status = "failed";
       proposal.error = activity.error ?? activity.status;
     } else {
-      const dirty = await isolationVerdict(deps, proposal);
+      const dirty = await isolationVerdict(deps, proposal, activity);
       if (dirty.dirty) {
         proposal.status = "discarded";
         proposal.discarded = true;
@@ -287,7 +307,15 @@ async function applyProposal(ctx: PluginContext, activity: RunActivity, deps: Pi
     record.updatedAt = deps.now();
   });
   for (const worktreePath of removals) {
-    await deps.removeProposalWorktree(source, worktreePath);
+    try {
+      await deps.removeProposalWorktree(source, worktreePath);
+    } catch (error) {
+      ctx.logger.warn("Could not remove proposal worktree", {
+        escalationId: loaded.id,
+        worktreePath,
+        message: error instanceof Error ? error.message : "cleanup failed",
+      });
+    }
   }
   if (updated && (updated.version ?? 0) !== before && !fanoutOpen.has(loaded.id)) {
     await finalize(ctx, loaded.companyId, loaded.id, deps);
@@ -404,7 +432,15 @@ async function expirePending(ctx: PluginContext, companyId: string, id: string, 
     record.updatedAt = deps.now();
   });
   for (const worktreePath of removals) {
-    await deps.removeProposalWorktree(loaded.cwd, worktreePath);
+    try {
+      await deps.removeProposalWorktree(loaded.cwd, worktreePath);
+    } catch (error) {
+      ctx.logger.warn("Could not remove proposal worktree", {
+        escalationId: id,
+        worktreePath,
+        message: error instanceof Error ? error.message : "cleanup failed",
+      });
+    }
   }
   if (updated && (updated.version ?? 0) !== before && !fanoutOpen.has(id)) {
     await finalize(ctx, companyId, id, deps);
@@ -430,6 +466,10 @@ export async function resumeEscalations(ctx: PluginContext, deps: PipelineDeps =
     }
     const fresh = await loadEscalation(ctx, ref.companyId, ref.id);
     if (!fresh) continue;
+    if (fanoutReadyToJudge(fresh) && !fanoutOpen.has(fresh.id)) {
+      await finalize(ctx, ref.companyId, ref.id, deps);
+      continue;
+    }
     if (fresh.status === "judging" || (fresh.status === "failed" && fresh.delivery?.retryable)) {
       await deliver(ctx, ref.companyId, ref.id, deps);
     }

@@ -67,7 +67,11 @@ Dan approves with the **Approve** button (confirm dialog) or a thread reply that
 
 These CLI flags were checked against `--help` on Dan's Mac. Their runtime behavior has not been exercised.
 
-Each proposal runs in its own detached `git worktree`, not in the issue checkout. The wake does not take the issue execution lock. A commit or any worktree change discards that proposal, and the worktree is removed afterward. If the worktree cannot be created, that slot fails and the real checkout is not used.
+Each proposal runs in its own detached `git worktree`, not in the issue checkout. The worktree starts from `HEAD` plus the source checkout's staged, unstaged, and untracked files. That copy does not change the source checkout. The mutation baseline is taken after the copy, so a proposal that leaves those files alone is kept, and a later edit or commit is discarded. The wake does not take the issue execution lock. Claude and Codex use the worktree even when the agent has its own `cwd`. If the reported execution directory is not that worktree, the proposal is discarded. If the worktree cannot be created, that slot fails and the real checkout is not used.
+
+A finished fan-out stays recoverable until it leaves `fanning_out`. Cleanup errors are logged and do not skip the judge. A worker restart finalizes a fan-out whose proposal slots are already recorded.
+
+Approve and Reject buttons are included when a judge result exists, including the first Slack post and a retry. A failure with nothing to judge has no buttons.
 
 Grok and Kimi report the adapter type `process`. The failed harness is the `harnessAgents` entry whose agent id matches the failed run, and the next two harnesses are chosen from that name.
 

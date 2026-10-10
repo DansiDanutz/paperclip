@@ -2922,6 +2922,9 @@ export function heartbeatService(db: Db) {
     const escalationCwd = isEscalationProposalWake(context)
       ? readNonEmptyString(context.escalationCwd)
       : null;
+    const adapterRuntimeConfig = escalationCwd
+      ? { ...runtimeConfig, cwd: escalationCwd }
+      : runtimeConfig;
     const executionWorkspace: RealizedExecutionWorkspace = escalationCwd
       ? {
           ...executionWorkspaceBase,
@@ -3338,6 +3341,19 @@ export function heartbeatService(db: Db) {
             if (key in meta.env) meta.env[key] = "***REDACTED***";
           }
         }
+        if (isEscalationProposalWake(context)) {
+          const executionCwd = readNonEmptyString(meta.cwd);
+          if (executionCwd) {
+            context.paperclipExecutionCwd = executionCwd;
+            await db
+              .update(heartbeatRuns)
+              .set({
+                contextSnapshot: context,
+                updatedAt: new Date(),
+              })
+              .where(eq(heartbeatRuns.id, run.id));
+          }
+        }
         await appendRunEvent(currentRun, seq++, {
           eventType: "adapter.invoke",
           stream: "system",
@@ -3366,7 +3382,7 @@ export function heartbeatService(db: Db) {
         runId: run.id,
         agent,
         runtime: runtimeForAdapter,
-        config: runtimeConfig,
+        config: adapterRuntimeConfig,
         context,
         onLog,
         onMeta: onAdapterMeta,

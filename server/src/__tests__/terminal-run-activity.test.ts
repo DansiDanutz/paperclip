@@ -57,12 +57,14 @@ describe("terminal run activity", () => {
           branchName: "fix",
           cwd: "/tmp/repo",
         },
+        paperclipExecutionCwd: "/tmp/paperclip-escalation/worktree",
       },
     });
     expect(details.escalationProposal).toBe(true);
     expect(details.repoUrl).toBe("https://github.com/DansiDanutz/paperclip");
     expect(details.branchName).toBe("fix");
     expect(details.cwd).toBe("/tmp/repo");
+    expect(details.executionCwd).toBe("/tmp/paperclip-escalation/worktree");
     expect(details.stderrExcerpt?.endsWith("TAIL")).toBe(true);
     expect(details.stderrExcerpt?.length).toBe(TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS);
   });

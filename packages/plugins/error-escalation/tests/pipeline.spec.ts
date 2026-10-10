@@ -3,9 +3,9 @@ import type { Agent, Company, Issue } from "@paperclipai/shared";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION, SLACK_REJECT_CALLBACK } from "../src/constants.js";
 import manifest from "../src/manifest.js";
-import { setPipelineOverrides, type PipelineDeps } from "../src/pipeline.js";
-import { buildApprovalMessage } from "../src/slack.js";
-import { listEscalationsForIssue, type EscalationRecord } from "../src/state.js";
+import { resumeEscalations, setPipelineOverrides, type PipelineDeps } from "../src/pipeline.js";
+import { buildApprovalMessage, postEscalationMessage } from "../src/slack.js";
+import { listEscalationsForIssue, listPendingDeliveries, rememberPendingDelivery, saveEscalation, type EscalationRecord } from "../src/state.js";
 import plugin from "../src/worker.js";
 
 const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
@@ -243,6 +243,63 @@ async function currentEscalation(harness: Awaited<ReturnType<typeof setup>>["har
   return rows[0] ?? null;
 }
 
+function actionIds(body: Record<string, unknown>): string[] {
+  const blocks = Array.isArray(body.blocks) ? body.blocks : [];
+  const actions = blocks.find((block) => {
+    return Boolean(block) && typeof block === "object" && (block as { type?: string }).type === "actions";
+  }) as { elements?: Array<{ action_id?: string }> } | undefined;
+  return (actions?.elements ?? []).map((element) => element.action_id ?? "");
+}
+
+function stuckFanout(proposals: EscalationRecord["proposals"]): EscalationRecord {
+  return {
+    id: "esc-stuck",
+    companyId: COMPANY_ID,
+    issueId: ISSUE_ID,
+    failedRunId: "run-stuck",
+    failedAgentId: CLAUDE_ID,
+    failedAdapterType: "claude_local",
+    error: "adapter exploded",
+    errorCode: "adapter_failed",
+    stdoutExcerpt: null,
+    stderrExcerpt: null,
+    repoUrl: null,
+    repoRef: null,
+    branchName: null,
+    cwd: "/tmp/seme",
+    baselinePorcelain: null,
+    candidates: ["codex_local", "grok_build"],
+    proposals,
+    judge: null,
+    status: "fanning_out",
+    slack: null,
+    decision: null,
+    failureNote: null,
+    version: 2,
+    delivery: null,
+    proposalDeadlineAt: null,
+    createdAt: "2026-10-09T12:00:00.000Z",
+    updatedAt: "2026-10-09T12:00:00.000Z",
+  };
+}
+
+function readySlot(adapterType: string, text: string): EscalationRecord["proposals"][number] {
+  return {
+    adapterType,
+    agentId: adapterType === "codex_local" ? CODEX_ID : GROK_ID,
+    runId: `run-${adapterType}`,
+    text,
+    dirty: false,
+    discarded: false,
+    discardReason: null,
+    status: "ready",
+    error: null,
+    worktreePath: null,
+    baselineHead: "abc123",
+    baselinePorcelain: "",
+  };
+}
+
 afterEach(() => {
   setPipelineOverrides(null);
 });
@@ -288,9 +345,21 @@ describe("error escalation pipeline", () => {
     expect(judged).toHaveLength(1);
     expect(judged[0]?.model).toBe("openrouter/free");
     expect(posted).toHaveLength(1);
-    const message = buildApprovalMessage(posted[0]!, true);
-    const actions = message.blocks.find((block) => block.type === "actions") as { elements: Array<{ action_id: string }> };
-    expect(actions.elements.map((element) => element.action_id)).toEqual([SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION]);
+    expect(posted[0]?.status).toBe("judging");
+    expect(posted[0]?.judge).toBeTruthy();
+    const approvalBodies: Array<Record<string, unknown>> = [];
+    await postEscalationMessage({
+      transport: {
+        fetch: async (_url, init) => {
+          approvalBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(JSON.stringify({ ok: true, channel: CHANNEL, ts: "1.1" }), { status: 200 });
+        },
+      },
+      token: "xoxb-test",
+      channel: CHANNEL,
+      record: posted[0]!,
+    });
+    expect(actionIds(approvalBodies[0]!)).toEqual([SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION]);
     const record = await currentEscalation(harness);
     expect(record?.status).toBe("awaiting_approval");
     expect(record?.slack).toEqual({ channel: CHANNEL, ts: "1700000000.000100" });
@@ -854,14 +923,27 @@ describe("error escalation pipeline", () => {
 
   it("does not mark awaiting approval when Slack posting fails", async () => {
     let posts = 0;
+    const bodies: Array<Record<string, unknown>> = [];
+    const postedStatuses: string[] = [];
     const { harness, invokes } = await setup(baseConfig({ proposalTimeoutSec: 0 }), {
       schedule: async (_ms, fn) => {
         await fn();
       },
-      postSlack: async () => {
+      postSlack: async (record) => {
         posts += 1;
-        if (posts === 1) throw new Error("slack down");
-        return { channel: CHANNEL, ts: "1700000000.000200" };
+        postedStatuses.push(record.status);
+        return postEscalationMessage({
+          transport: {
+            fetch: async (_url, init) => {
+              bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+              if (posts === 1) throw new Error("slack down");
+              return new Response(JSON.stringify({ ok: true, channel: CHANNEL, ts: "1700000000.000200" }), { status: 200 });
+            },
+          },
+          token: "xoxb-test",
+          channel: CHANNEL,
+          record,
+        });
       },
     });
     await emit(harness, "agent.run.failed", failurePayload({ runId: "slack-retry" }));
@@ -883,6 +965,10 @@ describe("error escalation pipeline", () => {
     expect(record?.status).toBe("awaiting_approval");
     expect(record?.slack?.ts).toBe("1700000000.000200");
     expect(record?.judge?.decision).toBe("Use the Codex diff");
+    expect(postedStatuses).toEqual(["judging", "failed"]);
+    expect(bodies).toHaveLength(2);
+    expect(actionIds(bodies[0]!)).toEqual([SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION]);
+    expect(actionIds(bodies[1]!)).toEqual([SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION]);
   });
 
   it("fails a proposal that exceeds proposalTimeoutSec and continues", async () => {
@@ -915,5 +1001,92 @@ describe("error escalation pipeline", () => {
     const record = await currentEscalation(harness);
     expect(record?.proposals.every((proposal) => proposal.status === "failed")).toBe(true);
     expect(record?.status).toBe("failed");
+  });
+
+  it("discards a proposal that ran outside the isolated worktree", async () => {
+    const { harness, invokes, judged } = await setup();
+    await emit(harness, "agent.run.failed", failurePayload({ runId: "outside-cwd" }));
+    await emit(harness, "agent.run.finished", {
+      runId: invokes[0]!.runId,
+      agentId: CODEX_ID,
+      status: "succeeded",
+      escalationProposal: true,
+      stdoutExcerpt: "edited the real checkout",
+      executionCwd: "/tmp/real-checkout",
+    });
+    await emit(harness, "agent.run.finished", {
+      runId: invokes[1]!.runId,
+      agentId: GROK_ID,
+      status: "succeeded",
+      escalationProposal: true,
+      stdoutExcerpt: "stayed in the worktree",
+      executionCwd: "/tmp/seme-isolated",
+    });
+    const record = await currentEscalation(harness);
+    expect(record?.proposals.find((proposal) => proposal.adapterType === "codex_local")?.status).toBe("discarded");
+    expect(record?.proposals.find((proposal) => proposal.adapterType === "codex_local")?.discardReason).toContain("isolated worktree");
+    expect(record?.proposals.find((proposal) => proposal.adapterType === "grok_build")?.status).toBe("ready");
+    expect(judged).toHaveLength(1);
+  });
+
+  it("still judges when the last proposal worktree cleanup throws", async () => {
+    let removals = 0;
+    const pendingOnLastCleanup: string[] = [];
+    let harnessRef: Awaited<ReturnType<typeof setup>>["harness"] | null = null;
+    const result = await setup(baseConfig(), {
+      removeProposalWorktree: async () => {
+        removals += 1;
+        if (removals < 2 || !harnessRef) return;
+        pendingOnLastCleanup.push(...(await listPendingDeliveries(harnessRef.ctx)).map((entry) => entry.id));
+        throw new Error("cleanup failed");
+      },
+    });
+    harnessRef = result.harness;
+    const { harness, invokes, judged, posted } = result;
+    await emit(harness, "agent.run.failed", failurePayload({ runId: "cleanup-throw" }));
+    await emit(harness, "agent.run.finished", {
+      runId: invokes[0]!.runId,
+      agentId: CODEX_ID,
+      status: "succeeded",
+      escalationProposal: true,
+      stdoutExcerpt: "diff one",
+    });
+    await emit(harness, "agent.run.finished", {
+      runId: invokes[1]!.runId,
+      agentId: GROK_ID,
+      status: "succeeded",
+      escalationProposal: true,
+      stdoutExcerpt: "diff two",
+    });
+    const record = await currentEscalation(harness);
+    expect(pendingOnLastCleanup).toContain(record?.id);
+    expect(judged).toHaveLength(1);
+    expect(posted).toHaveLength(1);
+    expect(record?.status).toBe("awaiting_approval");
+  });
+
+  it("resumes a finished fan-out that never reached the judge", async () => {
+    const { harness, judged, posted } = await setup();
+    const record = stuckFanout([
+      readySlot("codex_local", "diff one"),
+      readySlot("grok_build", "diff two"),
+    ]);
+    await saveEscalation(harness.ctx, record);
+    await rememberPendingDelivery(harness.ctx, COMPANY_ID, record.id, true);
+    await resumeEscalations(harness.ctx);
+    expect(judged).toHaveLength(1);
+    expect(posted).toHaveLength(1);
+    const saved = await currentEscalation(harness);
+    expect(saved?.status).toBe("awaiting_approval");
+  });
+
+  it("does not judge a fan-out that has not recorded every slot", async () => {
+    const { harness, judged } = await setup();
+    const record = stuckFanout([]);
+    await saveEscalation(harness.ctx, record);
+    await rememberPendingDelivery(harness.ctx, COMPANY_ID, record.id, true);
+    await resumeEscalations(harness.ctx);
+    expect(judged).toHaveLength(0);
+    expect((await currentEscalation(harness))?.status).toBe("fanning_out");
   });
 });

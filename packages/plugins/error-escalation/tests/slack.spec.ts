@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION } from "../src/constants.js";
-import { buildApprovalMessage, parseSlackEnvelope, parseThreadReply, socketHealth, startSlackSocket, type SlackSocketLike } from "../src/slack.js";
+import { buildApprovalMessage, parseSlackEnvelope, parseThreadReply, postEscalationMessage, socketHealth, startSlackSocket, type SlackSocketLike } from "../src/slack.js";
 import type { EscalationRecord } from "../src/state.js";
 
 function record(): EscalationRecord {
@@ -68,6 +68,58 @@ describe("slack messages", () => {
 
     expect(parseThreadReply("reject: too broad")).toEqual({ outcome: "rejected", reason: "too broad" });
     expect(parseThreadReply("approve")).toEqual({ outcome: "approved", reason: null });
+  });
+
+  it("posts approve and reject while the record is still judging, including a failed attempt", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const judging = { ...record(), status: "judging" as const, slack: null };
+    const transport = {
+      fetch: async (_url: string, init?: RequestInit) => {
+        calls += 1;
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (calls === 1) throw new Error("slack down");
+        return new Response(JSON.stringify({ ok: true, channel: "C-FLEET", ts: "333.444" }), { status: 200 });
+      },
+    };
+    await expect(postEscalationMessage({
+      transport,
+      token: "xoxb-test",
+      channel: "C-FLEET",
+      record: judging,
+    })).rejects.toThrow(/slack down/);
+    const retry = { ...judging, status: "failed" as const };
+    const posted = await postEscalationMessage({
+      transport,
+      token: "xoxb-test",
+      channel: "C-FLEET",
+      record: retry,
+    });
+    expect(posted).toEqual({ channel: "C-FLEET", ts: "333.444" });
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      const blocks = body.blocks as Array<{ type?: string; elements?: Array<{ action_id?: string }> }>;
+      const actions = blocks.find((block) => block.type === "actions");
+      expect(actions?.elements?.map((element) => element.action_id)).toEqual([SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION]);
+    }
+  });
+
+  it("omits buttons when there is no judge result", async () => {
+    let body: Record<string, unknown> | null = null;
+    const failed = { ...record(), judge: null, status: "failed" as const, slack: null, failureNote: "Nothing was sent to the judge." };
+    await postEscalationMessage({
+      transport: {
+        fetch: async (_url, init) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ ok: true, channel: "C-FLEET", ts: "9.9" }), { status: 200 });
+        },
+      },
+      token: "xoxb-test",
+      channel: "C-FLEET",
+      record: failed,
+    });
+    const blocks = (body?.blocks ?? []) as Array<{ type?: string }>;
+    expect(blocks.some((block) => block.type === "actions")).toBe(false);
   });
 });
 
