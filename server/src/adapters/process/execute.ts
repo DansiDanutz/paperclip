@@ -1,6 +1,7 @@
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
 import {
   asString,
+  asBoolean,
   asNumber,
   asStringArray,
   parseObject,
@@ -11,13 +12,34 @@ import {
   runChildProcess,
 } from "../utils.js";
 
+const ESCALATION_PROMPT_ARG = "{escalationPrompt}";
+const PROMPT_FLAGS = new Set(["-p", "--single", "--prompt"]);
+
+export function applyEscalationPromptArg(args: string[], prompt: string): string[] {
+  const resolved: string[] = [];
+  for (const arg of args) {
+    if (arg !== ESCALATION_PROMPT_ARG) {
+      resolved.push(arg);
+      continue;
+    }
+    if (!prompt) {
+      const previous = resolved[resolved.length - 1];
+      if (previous && PROMPT_FLAGS.has(previous)) resolved.pop();
+      continue;
+    }
+    resolved.push(prompt);
+  }
+  return resolved;
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, config, onLog, onMeta } = ctx;
+  const { runId, agent, config, context, onLog, onMeta } = ctx;
   const command = asString(config.command, "");
   if (!command) throw new Error("Process adapter missing command");
 
   const args = asStringArray(config.args);
-  const cwd = asString(config.cwd, process.cwd());
+  const escalationCwd = asString(context.escalationCwd, "").trim();
+  const cwd = escalationCwd || asString(config.cwd, process.cwd());
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   for (const [k, v] of Object.entries(envConfig)) {
@@ -33,23 +55,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
   const graceSec = asNumber(config.graceSec, 15);
+  const passWakePromptOnStdin = asBoolean(config.passWakePromptOnStdin, false);
+  const escalationPrompt = asString(context.escalationPrompt, "").trim();
+  const commandArgs = applyEscalationPromptArg(args, escalationPrompt);
+  const stdin = passWakePromptOnStdin && escalationPrompt ? escalationPrompt : undefined;
 
   if (onMeta) {
     await onMeta({
       adapterType: "process",
       command: resolvedCommand,
       cwd,
-      commandArgs: args,
+      commandArgs,
       env: loggedEnv,
     });
   }
 
-  const proc = await runChildProcess(runId, command, args, {
+  const proc = await runChildProcess(runId, command, commandArgs, {
     cwd,
     env,
     timeoutSec,
     graceSec,
     onLog,
+    stdin,
   });
 
   if (proc.timedOut) {

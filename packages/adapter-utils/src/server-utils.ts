@@ -263,6 +263,7 @@ type PaperclipWakePayload = {
   missingCount: number;
   truncated: boolean;
   fallbackFetchNeeded: boolean;
+  taskPrompt: string | null;
 };
 
 function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null {
@@ -356,14 +357,16 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
         .map((entry) => entry.trim())
     : [];
   const executionStage = normalizePaperclipWakeExecutionStage(payload.executionStage);
+  const taskPrompt = asString(payload.taskPrompt, "").trim() || null;
+  const issue = normalizePaperclipWakeIssue(payload.issue);
 
-  if (comments.length === 0 && commentIds.length === 0 && !executionStage && !normalizePaperclipWakeIssue(payload.issue)) {
+  if (comments.length === 0 && commentIds.length === 0 && !executionStage && !issue && !taskPrompt) {
     return null;
   }
 
   return {
     reason: asString(payload.reason, "").trim() || null,
-    issue: normalizePaperclipWakeIssue(payload.issue),
+    issue,
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
     executionStage,
     commentIds,
@@ -374,6 +377,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     missingCount: asNumber(commentWindow.missingCount, 0),
     truncated: asBoolean(payload.truncated, false),
     fallbackFetchNeeded: asBoolean(payload.fallbackFetchNeeded, false),
+    taskPrompt,
   };
 }
 
@@ -477,6 +481,10 @@ export function renderPaperclipWakePrompt(
       "Do not call `/api/issues/{id}/checkout` again unless you intentionally switch to a different task.",
       "",
     );
+  }
+
+  if (normalized.taskPrompt) {
+    lines.push("Task prompt:", normalized.taskPrompt, "");
   }
 
   if (normalized.comments.length > 0) {
@@ -643,6 +651,33 @@ async function resolveSpawnTarget(
   }
 
   return { command: executable, args };
+}
+
+/**
+ * Directory a local adapter process should start in.
+ *
+ * A proposal wake supplies `context.escalationCwd` and a `git_worktree`
+ * workspace. Those win over the agent's configured `cwd`. Otherwise an
+ * `agent_home` workspace still defers to that configured folder.
+ */
+export function resolveAdapterExecutionCwd(input: {
+  config: Record<string, unknown>;
+  context: Record<string, unknown>;
+  fallbackCwd?: string;
+}): string {
+  const escalationCwd = asString(input.context.escalationCwd, "").trim();
+  if (escalationCwd) return escalationCwd;
+
+  const workspace = parseObject(input.context.paperclipWorkspace);
+  const workspaceCwd = asString(workspace.cwd, "").trim();
+  const workspaceSource = asString(workspace.source, "");
+  const workspaceStrategy = asString(workspace.strategy, "");
+  const configuredCwd = asString(input.config.cwd, "").trim();
+  if (workspaceStrategy === "git_worktree" && workspaceCwd) return workspaceCwd;
+
+  const useConfiguredInsteadOfAgentHome = workspaceSource === "agent_home" && configuredCwd.length > 0;
+  const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
+  return effectiveWorkspaceCwd || configuredCwd || input.fallbackCwd || process.cwd();
 }
 
 export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

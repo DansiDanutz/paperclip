@@ -1,0 +1,38 @@
+{
+  "name": "@paperclipai/plugin-error-escalation",
+  "version": "0.1.0",
+  "description": "Fan out failed heartbeats to read-only proposal harnesses, judge them, and request Slack approval",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
+  "scripts": {
+    "build": "pnpm --filter @paperclipai/plugin-sdk build && tsc",
+    "typecheck": "pnpm --filter @paperclipai/plugin-sdk build && tsc --noEmit",
+    "test": "vitest run --config ./vitest.config.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/ws": "^8.18.1",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.6"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  }
+}

@@ -84,6 +84,7 @@ export async function runChildProcess(
     timeoutSec: number;
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+    stdin?: string;
   },
 ): Promise<RunProcessResult> {
   return _runChildProcess(runId, command, args, {

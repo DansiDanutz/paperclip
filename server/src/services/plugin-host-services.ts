@@ -25,6 +25,7 @@ import { costService } from "./costs.js";
 import { assetService } from "./assets.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import { pluginStateStore } from "./plugin-state-store.js";
+import { buildPluginAgentInvokeWake } from "./plugin-agent-invoke.js";
 import { createPluginSecretsHandler } from "./plugin-secrets-handler.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
@@ -884,11 +885,19 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
+        const wake = buildPluginAgentInvokeWake({
+          prompt: params.prompt,
+          reason: params.reason,
+          issueId: params.issueId,
+          taskKey: params.taskKey,
+          escalationCwd: params.escalationCwd,
+        });
         const run = await heartbeat.wakeup(params.agentId, {
           source: "automation",
           triggerDetail: "system",
           reason: params.reason ?? null,
-          payload: { prompt: params.prompt },
+          payload: wake.payload,
+          contextSnapshot: wake.contextSnapshot,
           requestedByActorType: "system",
           requestedByActorId: pluginId,
         });

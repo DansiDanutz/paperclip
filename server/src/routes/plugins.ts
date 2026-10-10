@@ -48,6 +48,7 @@ import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js
 import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { resolvePluginBridgeCompanyScope } from "../services/plugin-bridge-scope.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 
 /** UI slot declaration extracted from plugin manifest */
@@ -826,8 +827,13 @@ export function pluginRoutes(
       return;
     }
 
-    if (body.companyId) {
-      assertCompanyAccess(req, body.companyId);
+    const scope = resolvePluginBridgeCompanyScope(body);
+    if (!scope.ok) {
+      res.status(403).json({ error: scope.error });
+      return;
+    }
+    if (scope.companyId) {
+      assertCompanyAccess(req, scope.companyId);
     }
 
     try {
@@ -836,7 +842,7 @@ export function pluginRoutes(
         "getData",
         {
           key: body.key,
-          params: body.params ?? {},
+          params: scope.params,
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -909,8 +915,13 @@ export function pluginRoutes(
       return;
     }
 
-    if (body.companyId) {
-      assertCompanyAccess(req, body.companyId);
+    const actionScope = resolvePluginBridgeCompanyScope(body);
+    if (!actionScope.ok) {
+      res.status(403).json({ error: actionScope.error });
+      return;
+    }
+    if (actionScope.companyId) {
+      assertCompanyAccess(req, actionScope.companyId);
     }
 
     try {
@@ -919,7 +930,7 @@ export function pluginRoutes(
         "performAction",
         {
           key: body.key,
-          params: body.params ?? {},
+          params: actionScope.params,
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -992,8 +1003,13 @@ export function pluginRoutes(
       renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
     } | undefined;
 
-    if (body?.companyId) {
-      assertCompanyAccess(req, body.companyId);
+    const dataScope = resolvePluginBridgeCompanyScope(body);
+    if (!dataScope.ok) {
+      res.status(403).json({ error: dataScope.error });
+      return;
+    }
+    if (dataScope.companyId) {
+      assertCompanyAccess(req, dataScope.companyId);
     }
 
     try {
@@ -1002,7 +1018,7 @@ export function pluginRoutes(
         "getData",
         {
           key,
-          params: body?.params ?? {},
+          params: dataScope.params,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );
@@ -1071,8 +1087,13 @@ export function pluginRoutes(
       renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
     } | undefined;
 
-    if (body?.companyId) {
-      assertCompanyAccess(req, body.companyId);
+    const actionKeyScope = resolvePluginBridgeCompanyScope(body);
+    if (!actionKeyScope.ok) {
+      res.status(403).json({ error: actionKeyScope.error });
+      return;
+    }
+    if (actionKeyScope.companyId) {
+      assertCompanyAccess(req, actionKeyScope.companyId);
     }
 
     try {
@@ -1081,7 +1102,7 @@ export function pluginRoutes(
         "performAction",
         {
           key,
-          params: body?.params ?? {},
+          params: actionKeyScope.params,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );
