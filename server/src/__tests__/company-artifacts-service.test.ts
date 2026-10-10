@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   assets,
   companies,
@@ -73,6 +74,7 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     await db.delete(issueComments);
     await db.delete(issueDocuments);
     await db.delete(documents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(projects);

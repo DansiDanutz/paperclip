@@ -59,6 +59,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await db.delete(issueRelations);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);

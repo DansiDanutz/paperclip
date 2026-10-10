@@ -191,6 +191,7 @@ describeEmbeddedPostgres("tool connection removal", () => {
     await db.delete(toolCatalogEntries);
     await db.delete(toolConnections);
     await db.delete(toolApplications);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(companyMemberships);

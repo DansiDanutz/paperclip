@@ -885,6 +885,7 @@ describeEmbeddedPostgres("tool access service", () => {
     await db.delete(toolConnections);
     await db.delete(toolApplications);
     await db.delete(issues);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(principalPermissionGrants);

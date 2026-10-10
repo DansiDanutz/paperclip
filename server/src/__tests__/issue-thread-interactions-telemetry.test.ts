@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -59,6 +60,7 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
     await db.delete(documents);
     await db.delete(issues);
     await db.delete(goals);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);

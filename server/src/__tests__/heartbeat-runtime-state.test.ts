@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
+  activityLog,
   agents,
   agentRuntimeState,
   agentWakeupRequests,
@@ -52,6 +53,7 @@ describeEmbeddedPostgres("heartbeat runtime state deduplication", () => {
   afterEach(async () => {
     clearAllHeartbeatRunRuntimeStatuses();
     await db.delete(heartbeatRunEvents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);

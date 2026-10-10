@@ -51,6 +51,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     await db.delete(issueDocuments);
     await db.delete(documents);
     await db.delete(issueComments);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issueWatchdogs);

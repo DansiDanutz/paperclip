@@ -119,6 +119,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);

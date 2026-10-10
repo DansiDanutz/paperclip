@@ -8,6 +8,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  activityLog,
   agents,
   companies,
   completionContracts,
@@ -122,6 +123,7 @@ describeEmbeddedPostgres("hidden runner PRP coordinator", () => {
     await db.delete(nativeRunResults);
     await db.delete(heartbeatRunEvents);
     await db.update(issues).set({ executionRunId: null });
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(completionContracts);
     await db.delete(issues);

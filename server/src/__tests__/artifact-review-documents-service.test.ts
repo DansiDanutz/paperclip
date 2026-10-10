@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   assets,
   companies,
@@ -67,6 +68,7 @@ describeEmbeddedPostgres("artifactReviewDocumentService", () => {
     await db.delete(issueAttachments);
     await db.delete(assets);
     await db.delete(issues);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);

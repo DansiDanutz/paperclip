@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   approvals,
@@ -43,6 +44,7 @@ describeEmbeddedPostgres("issue review attention", () => {
     await db.delete(issueApprovals);
     await db.delete(approvals);
     await db.delete(issueRecoveryActions);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
