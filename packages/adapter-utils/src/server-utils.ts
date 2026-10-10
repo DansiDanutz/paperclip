@@ -263,6 +263,7 @@ type PaperclipWakePayload = {
   missingCount: number;
   truncated: boolean;
   fallbackFetchNeeded: boolean;
+  taskPrompt: string | null;
 };
 
 function normalizePaperclipWakeIssue(value: unknown): PaperclipWakeIssue | null {
@@ -356,14 +357,16 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
         .map((entry) => entry.trim())
     : [];
   const executionStage = normalizePaperclipWakeExecutionStage(payload.executionStage);
+  const taskPrompt = asString(payload.taskPrompt, "").trim() || null;
+  const issue = normalizePaperclipWakeIssue(payload.issue);
 
-  if (comments.length === 0 && commentIds.length === 0 && !executionStage && !normalizePaperclipWakeIssue(payload.issue)) {
+  if (comments.length === 0 && commentIds.length === 0 && !executionStage && !issue && !taskPrompt) {
     return null;
   }
 
   return {
     reason: asString(payload.reason, "").trim() || null,
-    issue: normalizePaperclipWakeIssue(payload.issue),
+    issue,
     checkedOutByHarness: asBoolean(payload.checkedOutByHarness, false),
     executionStage,
     commentIds,
@@ -374,6 +377,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     missingCount: asNumber(commentWindow.missingCount, 0),
     truncated: asBoolean(payload.truncated, false),
     fallbackFetchNeeded: asBoolean(payload.fallbackFetchNeeded, false),
+    taskPrompt,
   };
 }
 
@@ -477,6 +481,10 @@ export function renderPaperclipWakePrompt(
       "Do not call `/api/issues/{id}/checkout` again unless you intentionally switch to a different task.",
       "",
     );
+  }
+
+  if (normalized.taskPrompt) {
+    lines.push("Task prompt:", normalized.taskPrompt, "");
   }
 
   if (normalized.comments.length > 0) {

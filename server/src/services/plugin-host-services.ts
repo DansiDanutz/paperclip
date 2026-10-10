@@ -884,11 +884,20 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
+        const issueId = typeof params.issueId === "string" && params.issueId.trim() ? params.issueId.trim() : null;
         const run = await heartbeat.wakeup(params.agentId, {
           source: "automation",
           triggerDetail: "system",
           reason: params.reason ?? null,
-          payload: { prompt: params.prompt },
+          payload: {
+            prompt: params.prompt,
+            ...(issueId ? { issueId } : {}),
+          },
+          contextSnapshot: {
+            ...(params.reason ? { wakeReason: params.reason } : {}),
+            ...(issueId ? { issueId, taskId: issueId } : {}),
+            escalationPrompt: params.prompt,
+          },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
         });

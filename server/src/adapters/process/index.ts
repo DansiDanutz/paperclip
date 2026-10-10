@@ -16,6 +16,7 @@ Core fields:
 - args (string[] | string, optional): command arguments
 - cwd (string, optional): absolute working directory
 - env (object, optional): KEY=VALUE environment variables
+- passWakePromptOnStdin (boolean, optional): write the heartbeat escalation prompt to stdin. Used by proposal-only process agents such as grok and kimi. Leave unset for existing process agents.
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds

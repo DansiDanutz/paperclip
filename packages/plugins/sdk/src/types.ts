@@ -933,7 +933,7 @@ export interface PluginAgentsClient {
   /** Resume a paused agent (sets status to idle). Throws if terminated, pending_approval, or not found. Requires `agents.resume`. */
   resume(agentId: string, companyId: string): Promise<Agent>;
   /** Invoke (wake up) an agent with a prompt payload. Throws if paused, terminated, pending_approval, or not found. Requires `agents.invoke`. */
-  invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string }): Promise<{ runId: string }>;
+  invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string; issueId?: string }): Promise<{ runId: string }>;
   /** Create, message, and close agent chat sessions. Requires `agent.sessions.*` capabilities. */
   sessions: PluginAgentSessionsClient;
 }

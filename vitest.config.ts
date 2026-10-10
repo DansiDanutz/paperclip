@@ -7,6 +7,7 @@ export default defineConfig({
       "packages/adapters/codex-local",
       "packages/adapters/opencode-local",
       "server",
+      "packages/plugins/error-escalation",
       "ui",
       "cli",
     ],

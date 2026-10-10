@@ -1,6 +1,7 @@
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
 import {
   asString,
+  asBoolean,
   asNumber,
   asStringArray,
   parseObject,
@@ -12,7 +13,7 @@ import {
 } from "../utils.js";
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, config, onLog, onMeta } = ctx;
+  const { runId, agent, config, context, onLog, onMeta } = ctx;
   const command = asString(config.command, "");
   if (!command) throw new Error("Process adapter missing command");
 
@@ -44,12 +45,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
   }
 
+  const passWakePromptOnStdin = asBoolean(config.passWakePromptOnStdin, false);
+  const escalationPrompt = asString(context.escalationPrompt, "").trim();
+  const stdin = passWakePromptOnStdin && escalationPrompt ? escalationPrompt : undefined;
+
   const proc = await runChildProcess(runId, command, args, {
     cwd,
     env,
     timeoutSec,
     graceSec,
     onLog,
+    stdin,
   });
 
   if (proc.timedOut) {
