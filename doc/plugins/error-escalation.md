@@ -9,7 +9,7 @@ The first harness is still the issue assignee. This plugin does not route work t
 From a Paperclip checkout:
 
 ```sh
-pnpm paperclipai plugin install ./packages/plugins/error-escalation
+npx paperclipai plugin install ./packages/plugins/error-escalation
 ```
 
 Enable the instance in the board plugin settings and fill the config below. Create the three company secrets first, then paste each secret's id into the matching config field. Do not put token values in plugin config.
