@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION } from "../src/constants.js";
-import { buildApprovalMessage, parseSlackEnvelope, parseThreadReply } from "../src/slack.js";
+import { buildApprovalMessage, parseSlackEnvelope, parseThreadReply, socketHealth, startSlackSocket, type SlackSocketLike } from "../src/slack.js";
 import type { EscalationRecord } from "../src/state.js";
 
 function record(): EscalationRecord {
@@ -27,6 +27,9 @@ function record(): EscalationRecord {
     slack: { channel: "C-FLEET", ts: "111.222" },
     decision: null,
     failureNote: null,
+    version: 1,
+    delivery: null,
+    proposalDeadlineAt: null,
     createdAt: "2026-10-09T00:00:00.000Z",
     updatedAt: "2026-10-09T00:00:00.000Z",
   };
@@ -65,5 +68,72 @@ describe("slack messages", () => {
 
     expect(parseThreadReply("reject: too broad")).toEqual({ outcome: "rejected", reason: "too broad" });
     expect(parseThreadReply("approve")).toEqual({ outcome: "approved", reason: null });
+  });
+});
+
+class FakeSocket implements SlackSocketLike {
+  static instances: FakeSocket[] = [];
+  sent: string[] = [];
+  private handlers: Record<string, Array<(data?: unknown) => void>> = {};
+
+  constructor(readonly url: string) {
+    FakeSocket.instances.push(this);
+  }
+
+  on(event: "message" | "close" | "error", cb: (data?: unknown) => void) {
+    this.handlers[event] ??= [];
+    this.handlers[event]!.push(cb);
+  }
+
+  send(data: string) {
+    this.sent.push(data);
+  }
+
+  close() {
+    for (const cb of this.handlers.close ?? []) cb();
+  }
+}
+
+describe("slack socket", () => {
+  it("retries a failed apps.connections.open without a global WebSocket", async () => {
+    FakeSocket.instances = [];
+    const states: string[] = [];
+    const timers: Array<() => void> = [];
+    let opens = 0;
+    const socket = startSlackSocket({
+      appToken: "xapp-test",
+      transport: {
+        fetch: async () => {
+          opens += 1;
+          if (opens === 1) {
+            return new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ ok: true, url: "wss://example.test/socket" }), { status: 200 });
+        },
+      },
+      onEnvelope: async () => undefined,
+      WebSocketImpl: FakeSocket,
+      schedule: (_ms, fn) => {
+        timers.push(fn);
+        return () => undefined;
+      },
+      onState: (state) => {
+        states.push(state);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(states).toContain("disconnected");
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(socketHealth("disconnected").status).toBe("degraded");
+    timers.at(-1)?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(FakeSocket.instances[0]?.url).toBe("wss://example.test/socket");
+    expect(states).toContain("open");
+    socket.stop();
+    const opensAfterStop = opens;
+    timers.at(-1)?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(opens).toBe(opensAfterStop);
   });
 });

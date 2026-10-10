@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { applyEscalationPromptArg, execute } from "../adapters/process/execute.ts";
 
@@ -79,5 +82,30 @@ describe("process adapter escalation prompt", () => {
     );
     expect(passed.exitCode).toBe(0);
     expect(String((passed.resultJson as { stdout?: string }).stdout ?? "")).toContain("proposal-only do not edit");
+  });
+
+  it("uses escalationCwd instead of the agent cwd", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "escalation-cwd-"));
+    const result = await execute({
+      runId: `cwd-${Date.now()}`,
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "proposal",
+        adapterType: "process",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: process.execPath,
+        args: ["-e", "process.stdout.write(process.cwd())"],
+        cwd: tmpdir(),
+        timeoutSec: 10,
+      },
+      context: { escalationCwd: dir },
+      onLog: async () => undefined,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(String((result.resultJson as { stdout?: string }).stdout ?? "")).toBe(dir);
   });
 });

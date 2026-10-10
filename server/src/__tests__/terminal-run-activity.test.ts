@@ -4,6 +4,7 @@ import {
   TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS,
   buildTerminalRunActivityDetails,
   isEscalationProposalWake,
+  shouldPublishTerminalRunActivity,
   terminalRunActivityAction,
   truncateActivityExcerpt,
 } from "../services/terminal-run-activity.ts";
@@ -16,6 +17,14 @@ describe("terminal run activity", () => {
     expect(terminalRunActivityAction("cancelled")).toBe("agent.run.cancelled");
     expect(terminalRunActivityAction("running")).toBeNull();
     expect(terminalRunActivityAction("queued")).toBeNull();
+  });
+
+  it("emits a terminal activity once when the same action is written again", () => {
+    expect(shouldPublishTerminalRunActivity("running", "cancelled")).toBe(true);
+    expect(shouldPublishTerminalRunActivity("cancelled", "cancelled")).toBe(false);
+    expect(shouldPublishTerminalRunActivity("succeeded", "succeeded")).toBe(false);
+    expect(shouldPublishTerminalRunActivity(null, "failed")).toBe(true);
+    expect(shouldPublishTerminalRunActivity("running", "running")).toBe(false);
   });
 
   it("marks only the proposal wake reason", () => {

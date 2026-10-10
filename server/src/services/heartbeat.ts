@@ -23,6 +23,8 @@ import { publishLiveEvent } from "./live-events.js";
 import { logActivity } from "./activity-log.js";
 import {
   buildTerminalRunActivityDetails,
+  isEscalationProposalWake,
+  shouldPublishTerminalRunActivity,
   terminalRunActivityAction,
 } from "./terminal-run-activity.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
@@ -1845,6 +1847,11 @@ export function heartbeatService(db: Db) {
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
   ) {
+    const previousStatus = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0]?.status ?? null);
     const updated = await db
       .update(heartbeatRuns)
       .set({ status, ...patch, updatedAt: new Date() })
@@ -1868,7 +1875,9 @@ export function heartbeatService(db: Db) {
           finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
         },
       });
-      await publishTerminalRunActivity(updated);
+      if (shouldPublishTerminalRunActivity(previousStatus, updated.status)) {
+        await publishTerminalRunActivity(updated);
+      }
     }
 
     return updated;
@@ -2910,7 +2919,20 @@ export function heartbeatService(db: Db) {
           workspace: existingExecutionWorkspace,
         })
       : null;
-    const executionWorkspace = reusedExecutionWorkspace ?? await realizeExecutionWorkspace({
+    const escalationCwd = isEscalationProposalWake(context)
+      ? readNonEmptyString(context.escalationCwd)
+      : null;
+    const executionWorkspace: RealizedExecutionWorkspace = escalationCwd
+      ? {
+          ...executionWorkspaceBase,
+          strategy: "git_worktree",
+          cwd: escalationCwd,
+          branchName: null,
+          worktreePath: escalationCwd,
+          warnings: [],
+          created: false,
+        }
+      : (reusedExecutionWorkspace ?? await realizeExecutionWorkspace({
           base: executionWorkspaceBase,
           config: runtimeConfig,
           issue: issueRef,
@@ -2920,7 +2942,7 @@ export function heartbeatService(db: Db) {
             companyId: agent.companyId,
           },
           recorder: workspaceOperationRecorder,
-        });
+        }));
     const resolvedProjectId = executionWorkspace.projectId ?? issueRef?.projectId ?? executionProjectId ?? null;
     const resolvedProjectWorkspaceId = issueRef?.projectWorkspaceId ?? resolvedWorkspace.workspaceId ?? null;
     let persistedExecutionWorkspace = null;
@@ -2935,7 +2957,9 @@ export function heartbeatService(db: Db) {
         ? mergeExecutionWorkspaceConfig(nextExecutionWorkspaceMetadataBase, configSnapshot)
         : nextExecutionWorkspaceMetadataBase;
     try {
-      persistedExecutionWorkspace = shouldReuseExisting && existingExecutionWorkspace
+      persistedExecutionWorkspace = escalationCwd
+        ? null
+        : shouldReuseExisting && existingExecutionWorkspace
         ? await executionWorkspacesSvc.update(existingExecutionWorkspace.id, {
             cwd: executionWorkspace.cwd,
             repoUrl: executionWorkspace.repoUrl,

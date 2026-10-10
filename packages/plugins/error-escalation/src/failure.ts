@@ -81,6 +81,7 @@ export function buildProposalPrompt(failure: RunActivity, harness: string): stri
     failure.stdoutExcerpt ?? "(none)",
     "Last stderr:",
     failure.stderrExcerpt ?? "(none)",
-    "Read-only CLI flags were confirmed from --help and have not been exercised at runtime. The dirty-tree check will discard your proposal if the workspace changes.",
+    "You are in a throwaway git worktree. Do not try to reach the original checkout.",
+    "Read-only CLI flags were confirmed from --help and have not been exercised at runtime. A commit or a worktree change discards the proposal.",
   ].join("\n");
 }

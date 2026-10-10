@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectNextHarnesses } from "../src/harnesses.js";
+import { resolveFailedHarness, selectNextHarnesses } from "../src/harnesses.js";
 
 describe("selectNextHarnesses", () => {
   const order = ["claude_local", "codex_local", "grok_build", "kimi"];
@@ -13,5 +13,21 @@ describe("selectNextHarnesses", () => {
 
   it("starts at the beginning when the failed adapter is outside the order", () => {
     expect(selectNextHarnesses("cursor", order, 2)).toEqual(["claude_local", "codex_local"]);
+  });
+
+  it("maps a process-adapter agent id back to its harness", () => {
+    const agents = {
+      claude_local: "claude",
+      codex_local: "codex",
+      grok_build: "grok",
+      kimi: "kimi",
+    };
+    expect(resolveFailedHarness({
+      adapterType: "process",
+      agentId: "grok",
+      harnessAgents: agents,
+      order,
+    })).toBe("grok_build");
+    expect(selectNextHarnesses("grok_build", order, 2)).toEqual(["kimi", "claude_local"]);
   });
 });

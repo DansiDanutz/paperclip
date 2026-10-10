@@ -19,6 +19,16 @@ export interface ProposalSlot {
   discardReason: string | null;
   status: ProposalStatus;
   error: string | null;
+  worktreePath: string | null;
+  baselineHead: string | null;
+  baselinePorcelain: string | null;
+}
+
+export interface DeliveryState {
+  phase: "judge" | "slack";
+  attempt: number;
+  retryable: boolean;
+  lastError: string | null;
 }
 
 export interface EscalationDecision {
@@ -51,6 +61,9 @@ export interface EscalationRecord {
   slack: { channel: string; ts: string } | null;
   decision: EscalationDecision | null;
   failureNote: string | null;
+  version: number;
+  delivery: DeliveryState | null;
+  proposalDeadlineAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -129,6 +142,98 @@ export function loadEscalationByProposalRun(ctx: PluginContext, companyId: strin
 
 export function loadEscalationBySlack(ctx: PluginContext, companyId: string, channel: string, ts: string) {
   return loadId(ctx, companyId, `by-slack:${channel}:${ts}`);
+}
+
+const locks = new Map<string, Promise<void>>();
+
+export function withRecordLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = locks.get(key) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => gate, () => gate);
+  locks.set(key, tail);
+  return previous.then(fn, fn).finally(() => {
+    release();
+    if (locks.get(key) === tail) locks.delete(key);
+  });
+}
+
+export async function mutateEscalation(
+  ctx: PluginContext,
+  companyId: string,
+  id: string,
+  mutate: (record: EscalationRecord) => void | false | Promise<void | false>,
+): Promise<EscalationRecord | null> {
+  return withRecordLock(id, async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const current = await loadEscalation(ctx, companyId, id);
+      if (!current) return null;
+      const version = typeof current.version === "number" ? current.version : 0;
+      const next = structuredClone(current);
+      next.version = version;
+      const changed = await mutate(next);
+      if (changed === false) return current;
+      const stored = await loadEscalation(ctx, companyId, id);
+      const storedVersion = stored && typeof stored.version === "number" ? stored.version : 0;
+      if (storedVersion !== version) continue;
+      next.version = version + 1;
+      await saveEscalation(ctx, next);
+      return next;
+    }
+    throw new Error(`Escalation ${id} changed concurrently`);
+  });
+}
+
+function earlyKey(runId: string) {
+  return { scopeKind: "instance" as const, stateKey: `early-proposal:${runId}` };
+}
+
+export async function saveEarlyProposal(ctx: PluginContext, activity: unknown): Promise<void> {
+  const runId = activity && typeof activity === "object" && typeof (activity as { runId?: unknown }).runId === "string"
+    ? (activity as { runId: string }).runId
+    : "";
+  if (!runId) return;
+  await ctx.state.set(earlyKey(runId), activity);
+}
+
+export async function takeEarlyProposal<T>(ctx: PluginContext, runId: string): Promise<T | null> {
+  const value = await ctx.state.get(earlyKey(runId));
+  if (!value || typeof value !== "object") return null;
+  await ctx.state.delete(earlyKey(runId));
+  return value as T;
+}
+
+const PENDING_DELIVERY = { scopeKind: "instance" as const, stateKey: "pending-delivery" };
+
+export interface PendingDeliveryRef {
+  companyId: string;
+  id: string;
+}
+
+export async function listPendingDeliveries(ctx: PluginContext): Promise<PendingDeliveryRef[]> {
+  const value = await ctx.state.get(PENDING_DELIVERY);
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is PendingDeliveryRef => {
+    return Boolean(entry) && typeof entry === "object"
+      && typeof (entry as PendingDeliveryRef).companyId === "string"
+      && typeof (entry as PendingDeliveryRef).id === "string";
+  });
+}
+
+export async function rememberPendingDelivery(
+  ctx: PluginContext,
+  companyId: string,
+  id: string,
+  active: boolean,
+): Promise<void> {
+  await withRecordLock("pending-delivery", async () => {
+    const current = await listPendingDeliveries(ctx);
+    const next = current.filter((entry) => entry.id !== id);
+    if (active) next.push({ companyId, id });
+    await ctx.state.set(PENDING_DELIVERY, next);
+  });
 }
 
 export async function listEscalationsForIssue(

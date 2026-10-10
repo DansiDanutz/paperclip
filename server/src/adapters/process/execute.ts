@@ -38,7 +38,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (!command) throw new Error("Process adapter missing command");
 
   const args = asStringArray(config.args);
-  const cwd = asString(config.cwd, process.cwd());
+  const escalationCwd = asString(context.escalationCwd, "").trim();
+  const cwd = escalationCwd || asString(config.cwd, process.cwd());
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
   for (const [k, v] of Object.entries(envConfig)) {

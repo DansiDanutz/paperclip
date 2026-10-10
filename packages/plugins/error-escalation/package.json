@@ -19,10 +19,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@paperclipai/plugin-sdk": "workspace:*"
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
+    "@types/ws": "^8.18.1",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "react": "^19.0.0",

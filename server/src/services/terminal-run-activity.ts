@@ -20,6 +20,21 @@ export function terminalRunActivityAction(status: string): TerminalRunActivityAc
   return null;
 }
 
+/**
+ * Publish one activity row for each terminal transition. A second write of the
+ * same terminal action (pause already cancelled the run, then the execution
+ * path writes cancelled again) must not emit a duplicate.
+ */
+export function shouldPublishTerminalRunActivity(
+  previousStatus: string | null | undefined,
+  nextStatus: string,
+): boolean {
+  const next = terminalRunActivityAction(nextStatus);
+  if (!next) return false;
+  const previous = previousStatus ? terminalRunActivityAction(previousStatus) : null;
+  return previous !== next;
+}
+
 export function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }

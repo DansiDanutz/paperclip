@@ -1,3 +1,4 @@
+import WebSocket from "ws";
 import { SLACK_APPROVE_ACTION, SLACK_REJECT_ACTION, SLACK_REJECT_CALLBACK } from "./constants.js";
 import type { EscalationRecord } from "./state.js";
 
@@ -326,57 +327,124 @@ export function envelopeId(envelope: unknown): string | null {
   return text(asRecord(envelope)?.envelope_id);
 }
 
+export type SocketConnectionState = "off" | "connecting" | "open" | "disconnected";
+
+export function socketHealth(state: SocketConnectionState): { status: "ok" | "degraded"; message: string } {
+  if (state === "open") return { status: "ok", message: "Slack socket connected" };
+  if (state === "off") return { status: "ok", message: "Error escalation plugin ready" };
+  return { status: "degraded", message: "Slack socket is disconnected" };
+}
+
+export interface SlackSocketLike {
+  send(data: string): void;
+  close(): void;
+  on(event: "message" | "close" | "error", cb: (data?: unknown) => void): void;
+}
+
+function rawText(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) return data.toString("utf8");
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  return "";
+}
+
+function defaultSocket(url: string): SlackSocketLike {
+  const socket = new WebSocket(url);
+  return {
+    send(data) {
+      socket.send(data);
+    },
+    close() {
+      socket.close();
+    },
+    on(event, cb) {
+      if (event === "message") socket.on("message", (data) => cb(data));
+      else if (event === "close") socket.on("close", () => cb(undefined));
+      else socket.on("error", (error) => cb(error));
+    },
+  };
+}
+
 /**
- * Slack Socket Mode client. Tests drive `parseSlackEnvelope` directly and do not open a socket.
+ * Slack Socket Mode client. Node 20 has no global WebSocket, so this uses `ws`.
+ * A failed `apps.connections.open` is retried. Tests can inject the socket.
  */
 export function startSlackSocket(input: {
   appToken: string;
   transport: SlackTransport;
   onEnvelope: (envelope: unknown) => Promise<void>;
+  WebSocketImpl?: new (url: string) => SlackSocketLike;
+  schedule?: (ms: number, fn: () => void) => () => void;
+  onState?: (state: SocketConnectionState, detail?: string) => void;
 }): { stop: () => void } {
   let stopped = false;
-  let socket: WebSocket | null = null;
+  let socket: SlackSocketLike | null = null;
+  let attempt = 0;
+  let cancelRetry: (() => void) | null = null;
+  const schedule = input.schedule ?? ((ms, fn) => {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  });
 
-  const connect = async () => {
+  const retry = (detail: string) => {
     if (stopped) return;
-    const opened = await slackApi(input.transport, input.appToken, "apps.connections.open", {});
-    const url = text(opened.url);
-    if (!url) throw new Error("Slack apps.connections.open did not return a url");
-    const Socket = globalThis.WebSocket;
-    if (!Socket) throw new Error("WebSocket is not available in this runtime");
-    socket = new Socket(url);
-    socket.addEventListener("message", (event) => {
-      void (async () => {
-        const raw = typeof event.data === "string" ? event.data : "";
-        let envelope: unknown;
-        try {
-          envelope = JSON.parse(raw);
-        } catch {
-          return;
-        }
-        const id = envelopeId(envelope);
-        if (id && socket) {
-          socket.send(JSON.stringify({ envelope_id: id }));
-        }
-        const type = text(asRecord(envelope)?.type);
-        if (type === "hello" || type === "disconnect") return;
-        await input.onEnvelope(envelope);
-      })().catch(() => undefined);
-    });
-    socket.addEventListener("close", () => {
-      socket = null;
-      if (!stopped) {
-        setTimeout(() => {
-          void connect().catch(() => undefined);
-        }, 1000);
-      }
+    input.onState?.("disconnected", detail);
+    attempt += 1;
+    const delay = Math.min(30_000, 1000 * 2 ** (attempt - 1));
+    cancelRetry?.();
+    cancelRetry = schedule(delay, () => {
+      cancelRetry = null;
+      void connect();
     });
   };
 
-  void connect().catch(() => undefined);
+  const connect = async () => {
+    if (stopped) return;
+    input.onState?.("connecting");
+    try {
+      const opened = await slackApi(input.transport, input.appToken, "apps.connections.open", {});
+      const url = text(opened.url);
+      if (!url) throw new Error("Slack apps.connections.open did not return a url");
+      if (stopped) return;
+      const openedSocket = input.WebSocketImpl ? new input.WebSocketImpl(url) : defaultSocket(url);
+      socket = openedSocket;
+      attempt = 0;
+      input.onState?.("open");
+      openedSocket.on("message", (data) => {
+        void (async () => {
+          const raw = rawText(data);
+          let envelope: unknown;
+          try {
+            envelope = JSON.parse(raw);
+          } catch {
+            return;
+          }
+          const id = envelopeId(envelope);
+          if (id) openedSocket.send(JSON.stringify({ envelope_id: id }));
+          const type = text(asRecord(envelope)?.type);
+          if (type === "hello" || type === "disconnect") return;
+          await input.onEnvelope(envelope);
+        })().catch(() => undefined);
+      });
+      openedSocket.on("close", () => {
+        if (socket === openedSocket) socket = null;
+        if (!stopped) retry("socket closed");
+      });
+      openedSocket.on("error", (error) => {
+        input.onState?.("disconnected", error instanceof Error ? error.message : "socket error");
+      });
+    } catch (error) {
+      if (stopped) return;
+      retry(error instanceof Error ? error.message : "apps.connections.open failed");
+    }
+  };
+
+  void connect();
   return {
     stop() {
       stopped = true;
+      cancelRetry?.();
+      cancelRetry = null;
       socket?.close();
       socket = null;
     },

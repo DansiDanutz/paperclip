@@ -656,7 +656,7 @@ export interface WorkerToHostMethods {
     result: Agent,
   ];
   "agents.invoke": [
-    params: { agentId: string; companyId: string; prompt: string; reason?: string; issueId?: string },
+    params: { agentId: string; companyId: string; prompt: string; reason?: string; issueId?: string; taskKey?: string; escalationCwd?: string },
     result: { runId: string },
   ];
 

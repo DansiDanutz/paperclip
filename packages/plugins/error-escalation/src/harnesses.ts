@@ -4,6 +4,26 @@ import { HARNESS_ORDER } from "./constants.js";
  * Take the next `count` harnesses after the one that failed, wrapping around
  * the configured order and never including the failed adapter.
  */
+/**
+ * Grok and Kimi run through the process adapter, so a failure reports
+ * `process` instead of `grok_build` or `kimi`. Match the configured agent id
+ * before choosing the next harnesses.
+ */
+export function resolveFailedHarness(input: {
+  adapterType: string;
+  agentId: string;
+  harnessAgents: Record<string, string>;
+  order: readonly string[];
+}): string {
+  const adapter = input.adapterType.trim();
+  if (adapter && adapter !== "process" && input.order.includes(adapter)) return adapter;
+  for (const harness of input.order) {
+    const configured = input.harnessAgents[harness]?.trim();
+    if (configured && configured === input.agentId) return harness;
+  }
+  return adapter || "unknown";
+}
+
 export function selectNextHarnesses(failedAdapter: string, order: readonly string[], count: number): string[] {
   if (count <= 0) return [];
   const cleaned: string[] = [];

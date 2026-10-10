@@ -40,7 +40,7 @@ App settings:
 - Event subscriptions: subscribe to `message.channels` (and `message.groups` for a private channel) so a thread reply of `approve` or `reject` is delivered
 - Invite the bot to the fleet channel
 
-Dan approves with the **Approve** button (confirm dialog) or a thread reply that starts with `approve`. Reject opens a modal that requires a reason, or a thread reply that starts with `reject`. Only `slackApproverUserId` is accepted, and the event must be for the stored channel id and message timestamp. A second decision is ignored.
+Dan approves with the **Approve** button (confirm dialog) or a thread reply that starts with `approve`. Reject opens a modal that requires a reason, or a thread reply that starts with `reject`. `slackApproverUserId` is required. An empty value rejects every button, modal, and thread reply. The event must be for the stored channel id and message timestamp. A second decision is ignored. Concurrent approve and reject collapse to one saved decision.
 
 ## Config
 
@@ -49,11 +49,11 @@ Dan approves with the **Approve** button (confirm dialog) or a thread reply that
 | `enabled` | `true` | Turn the pipeline off without uninstalling |
 | `sink` | `slack` | Only Slack is implemented. Other values are ignored |
 | `slackChannelId` | empty | One fleet-wide channel id, such as `C0123` |
-| `slackApproverUserId` | empty | Slack user id allowed to approve or reject |
+| `slackApproverUserId` | empty | Required Slack user id. Empty rejects every decision |
 | `judgeModel` | `openrouter/free` | OpenRouter model id. `openrouter/free` routes only to currently free models. Change it to pin another model |
 | `harnessOrder` | `claude_local`, `codex_local`, `grok_build`, `kimi` | Circular order used to pick the next harnesses |
 | `fanoutCount` | `2` | How many of the next harnesses to ask |
-| `proposalTimeoutSec` | `600` | Documented timeout budget for a proposal run |
+| `proposalTimeoutSec` | `600` | Seconds before a still-pending proposal is marked failed. The plugin then removes its worktree. Paperclip has no plugin API to cancel the heartbeat, so a late result is ignored |
 | `harnessAgents.claude_local` | empty | Agent id for the Claude proposal harness |
 | `harnessAgents.codex_local` | empty | Agent id for the Codex proposal harness |
 | `harnessAgents.grok_build` | empty | Agent id for the Grok Build CLI proposal harness |
@@ -65,7 +65,15 @@ Dan approves with the **Approve** button (confirm dialog) or a thread reply that
 
 ## Proposal agents
 
-These CLI flags were checked against `--help` on Dan's Mac. Their runtime behavior has not been exercised. A dirty git worktree is still discarded after the run.
+These CLI flags were checked against `--help` on Dan's Mac. Their runtime behavior has not been exercised.
+
+Each proposal runs in its own detached `git worktree`, not in the issue checkout. The wake does not take the issue execution lock. A commit or any worktree change discards that proposal, and the worktree is removed afterward. If the worktree cannot be created, that slot fails and the real checkout is not used.
+
+Grok and Kimi report the adapter type `process`. The failed harness is the `harnessAgents` entry whose agent id matches the failed run, and the next two harnesses are chosen from that name.
+
+A judge or Slack failure is retried three times. The escalation shows `failed` with `failureNote` while it retries, and stays `failed` after the last attempt. `awaiting_approval` is stored only after Slack returns a message timestamp.
+
+Socket Mode uses the `ws` package so it connects on Node 20. A failed `apps.connections.open` is retried, and health is degraded until the socket is open.
 
 | Harness | Command | Adapter settings |
 | --- | --- | --- |

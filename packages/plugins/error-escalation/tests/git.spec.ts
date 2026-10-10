@@ -3,7 +3,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { proposalDirtiedWorktree, readPorcelain } from "../src/git.js";
+import { existsSync } from "node:fs";
+import { createProposalWorktree, proposalChangedIsolation, proposalDirtiedWorktree, readHead, readPorcelain, removeProposalWorktree } from "../src/git.js";
 
 function gitRepo(): string {
   const cwd = mkdtempSync(path.join(tmpdir(), "escalation-git-"));
@@ -37,5 +38,46 @@ describe("dirty worktree backstop", () => {
       current: after,
     });
     expect(verdict.dirty).toBe(true);
+  });
+
+  it("runs the proposal in a throwaway worktree and notices a commit", async () => {
+    const source = gitRepo();
+    const sourceHead = await readHead(source);
+    const created = await createProposalWorktree(source);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    writeFileSync(path.join(created.path, "README.md"), "changed\n");
+    const edited = await readPorcelain(created.path);
+    expect(proposalChangedIsolation({
+      baselineHead: created.head,
+      baselinePorcelain: created.porcelain,
+      currentHead: created.head,
+      current: edited,
+    }).dirty).toBe(true);
+    execFileSync("git", ["add", "README.md"], { cwd: created.path });
+    execFileSync("git", ["commit", "-m", "proposal"], { cwd: created.path });
+    const committed = await readHead(created.path);
+    expect(committed.ok && committed.head).not.toBe(created.head);
+    expect(proposalChangedIsolation({
+      baselineHead: created.head,
+      baselinePorcelain: "",
+      currentHead: committed.ok ? committed.head : null,
+      current: { ok: true, porcelain: "" },
+    }).dirty).toBe(true);
+    const sourceAfter = await readPorcelain(source);
+    const sourceHeadAfter = await readHead(source);
+    expect(sourceAfter.ok).toBe(true);
+    expect(sourceHead.ok).toBe(true);
+    expect(sourceHeadAfter.ok).toBe(true);
+    if (sourceAfter.ok) expect(sourceAfter.porcelain).toBe("");
+    if (sourceHead.ok && sourceHeadAfter.ok) expect(sourceHeadAfter.head).toBe(sourceHead.head);
+    await removeProposalWorktree(source, created.path);
+    expect(existsSync(created.path)).toBe(false);
+  });
+
+  it("fails closed when the source is not a git checkout", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "escalation-not-git-"));
+    const created = await createProposalWorktree(cwd);
+    expect(created.ok).toBe(false);
   });
 });

@@ -3,8 +3,16 @@ import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import { parseEscalationConfig } from "./config.js";
 import { PROPOSAL_WAKE_REASON } from "./constants.js";
 import { buildProposalPrompt, parseRunActivity, type RunActivity } from "./failure.js";
-import { proposalDirtiedWorktree, readPorcelain, type PorcelainResult } from "./git.js";
-import { selectNextHarnesses } from "./harnesses.js";
+import {
+  createProposalWorktree,
+  proposalChangedIsolation,
+  readHead,
+  readPorcelain,
+  removeProposalWorktree,
+  type PorcelainResult,
+  type ProposalWorktree,
+} from "./git.js";
+import { resolveFailedHarness, selectNextHarnesses } from "./harnesses.js";
 import { requestJudge } from "./judge.js";
 import {
   openRejectModal,
@@ -18,16 +26,29 @@ import {
 import {
   findEscalationById,
   findEscalationBySlackMessage,
+  listPendingDeliveries,
+  loadEscalation,
   loadEscalationByFailedRun,
   loadEscalationByProposalRun,
+  mutateEscalation,
+  rememberPendingDelivery,
+  saveEarlyProposal,
   saveEscalation,
+  takeEarlyProposal,
+  withRecordLock,
   type EscalationRecord,
   type ProposalSlot,
 } from "./state.js";
 
+const DELIVERY_MAX_ATTEMPTS = 3;
+
 export interface PipelineDeps {
   now: () => string;
   readPorcelain: (cwd: string) => Promise<PorcelainResult>;
+  readHead: (cwd: string) => Promise<{ ok: true; head: string } | { ok: false; error: string }>;
+  createProposalWorktree: (sourceCwd: string) => Promise<ProposalWorktree>;
+  removeProposalWorktree: (sourceCwd: string | null, worktreePath: string) => Promise<void>;
+  schedule: (ms: number, fn: () => void | Promise<void>) => (() => void) | Promise<void>;
   judge: (record: EscalationRecord, model: string) => Promise<{ decision: string; reason: string }>;
   postSlack: (record: EscalationRecord) => Promise<{ channel: string; ts: string }>;
   updateSlack: (record: EscalationRecord) => Promise<void>;
@@ -36,12 +57,16 @@ export interface PipelineDeps {
 }
 
 const overrides: Partial<PipelineDeps> = {};
-const finalizing = new Set<string>();
+const delivering = new Set<string>();
+const timeoutArmed = new Set<string>();
+const fanoutOpen = new Set<string>();
 
 export function setPipelineOverrides(next: Partial<PipelineDeps> | null): void {
   for (const key of Object.keys(overrides) as Array<keyof PipelineDeps>) {
     delete overrides[key];
   }
+  timeoutArmed.clear();
+  fanoutOpen.clear();
   if (next) Object.assign(overrides, next);
 }
 
@@ -52,6 +77,13 @@ function productionDeps(ctx: PluginContext): PipelineDeps {
   return {
     now: () => new Date().toISOString(),
     readPorcelain: (cwd) => readPorcelain(cwd),
+    readHead: (cwd) => readHead(cwd),
+    createProposalWorktree: (cwd) => createProposalWorktree(cwd),
+    removeProposalWorktree: (cwd, worktreePath) => removeProposalWorktree(cwd, worktreePath),
+    schedule: (ms, fn) => {
+      const timer = setTimeout(fn, ms);
+      return () => clearTimeout(timer);
+    },
     async judge(record, model) {
       const config = parseEscalationConfig(await ctx.config.get());
       if (!config.openRouterApiKeySecretId) throw new Error("openRouterApiKeySecretId is not configured");
@@ -109,6 +141,10 @@ export function resolveDeps(ctx: PluginContext): PipelineDeps {
   return { ...productionDeps(ctx), ...overrides };
 }
 
+function backoffMs(attempt: number): number {
+  return Math.min(30_000, 1000 * 2 ** Math.max(0, attempt - 1));
+}
+
 async function noteApplyFlags(ctx: PluginContext): Promise<void> {
   const raw = await ctx.config.get();
   if (raw.autoApply === true || raw.applyOnApprove === true) {
@@ -127,7 +163,31 @@ function slot(adapterType: string, agentId: string | null, status: ProposalSlot[
     discardReason: status === "discarded" ? error : null,
     status,
     error,
+    worktreePath: null,
+    baselineHead: null,
+    baselinePorcelain: null,
   };
+}
+
+function needsResume(record: EscalationRecord): boolean {
+  return record.proposals.some((proposal) => proposal.status === "pending")
+    || record.status === "judging"
+    || (record.status === "failed" && record.delivery?.retryable === true);
+}
+
+async function syncPending(ctx: PluginContext, record: EscalationRecord): Promise<void> {
+  await rememberPendingDelivery(ctx, record.companyId, record.id, needsResume(record));
+}
+
+async function updateRecord(
+  ctx: PluginContext,
+  companyId: string,
+  id: string,
+  mutate: (record: EscalationRecord) => void | false | Promise<void | false>,
+): Promise<EscalationRecord | null> {
+  const next = await mutateEscalation(ctx, companyId, id, mutate);
+  if (next) await syncPending(ctx, next);
+  return next;
 }
 
 async function publishDocuments(ctx: PluginContext, record: EscalationRecord): Promise<void> {
@@ -135,6 +195,7 @@ async function publishDocuments(ctx: PluginContext, record: EscalationRecord): P
   const body = [
     `# Escalation ${record.id}`,
     `Status: ${record.status}`,
+    record.failureNote ? `Note: ${record.failureNote}` : "",
     record.judge ? `Decision: ${record.judge.decision}\nReason: ${record.judge.reason}` : "",
     ...record.proposals.map((proposal) => `## ${proposal.adapterType} (${proposal.status})\n${proposal.text ?? proposal.error ?? ""}`),
   ].filter(Boolean).join("\n\n");
@@ -167,61 +228,218 @@ async function comment(ctx: PluginContext, record: EscalationRecord, body: strin
   }
 }
 
-async function finalize(ctx: PluginContext, record: EscalationRecord, deps: PipelineDeps): Promise<void> {
-  if (record.proposals.some((proposal) => proposal.status === "pending")) return;
-  if (record.status !== "fanning_out") return;
-  if (finalizing.has(record.id)) return;
-  finalizing.add(record.id);
-  try {
-    record.status = "judging";
-    record.updatedAt = deps.now();
-    await saveEscalation(ctx, record);
-    const config = parseEscalationConfig(await ctx.config.get());
-    const ready = record.proposals.filter((proposal) => proposal.status === "ready" && proposal.text);
-    if (ready.length === 0) {
-      record.status = "failed";
-      record.failureNote = "Every proposal was discarded or failed. Nothing was sent to the judge.";
-      record.updatedAt = deps.now();
-      await saveEscalation(ctx, record);
-      await publishDocuments(ctx, record);
-      try {
-        record.slack = await deps.postSlack(record);
-        record.updatedAt = deps.now();
-        await saveEscalation(ctx, record);
-      } catch (error) {
-        ctx.logger.warn("Slack delivery failed", { message: error instanceof Error ? error.message : "unknown" });
+function armTimeout(ctx: PluginContext, record: EscalationRecord, deps: PipelineDeps, timeoutSec: number): void {
+  if (timeoutSec <= 0 || timeoutArmed.has(record.id)) return;
+  if (!record.proposals.some((proposal) => proposal.status === "pending") && !record.proposalDeadlineAt) return;
+  timeoutArmed.add(record.id);
+  const waitMs = record.proposalDeadlineAt
+    ? Math.max(0, Date.parse(record.proposalDeadlineAt) - Date.parse(deps.now()))
+    : timeoutSec * 1000;
+  void deps.schedule(waitMs, () => {
+    timeoutArmed.delete(record.id);
+    return expirePending(ctx, record.companyId, record.id, deps);
+  });
+}
+
+async function isolationVerdict(deps: PipelineDeps, proposal: ProposalSlot) {
+  if (!proposal.worktreePath) return { dirty: true, error: "Proposal worktree is missing" };
+  const current = await deps.readPorcelain(proposal.worktreePath);
+  const head = await deps.readHead(proposal.worktreePath);
+  return proposalChangedIsolation({
+    baselineHead: proposal.baselineHead,
+    baselinePorcelain: proposal.baselinePorcelain,
+    currentHead: head.ok ? head.head : null,
+    current,
+    headError: head.ok ? null : head.error,
+  });
+}
+
+async function applyProposal(ctx: PluginContext, activity: RunActivity, deps: PipelineDeps): Promise<void> {
+  const loaded = await loadEscalationByProposalRun(ctx, activity.companyId, activity.runId);
+  if (!loaded) return;
+  const removals: string[] = [];
+  let source: string | null = loaded.cwd;
+  const before = loaded.version ?? 0;
+  const updated = await updateRecord(ctx, loaded.companyId, loaded.id, async (record) => {
+    const proposal = record.proposals.find((entry) => entry.runId === activity.runId);
+    if (!proposal || proposal.status !== "pending") return false;
+    source = record.cwd;
+    if (activity.eventType === "agent.run.cancelled" || activity.eventType === "agent.run.failed") {
+      proposal.status = "failed";
+      proposal.error = activity.error ?? activity.status;
+    } else {
+      const dirty = await isolationVerdict(deps, proposal);
+      if (dirty.dirty) {
+        proposal.status = "discarded";
+        proposal.discarded = true;
+        proposal.dirty = true;
+        proposal.discardReason = dirty.error ?? "Workspace was dirty after the proposal run";
+        proposal.text = null;
+      } else {
+        proposal.status = "ready";
+        proposal.text = activity.stdoutExcerpt || activity.stderrExcerpt || "(no output)";
       }
-      return;
     }
-    const judged = await deps.judge(record, config.judgeModel);
-    record.judge = { model: config.judgeModel, decision: judged.decision, reason: judged.reason };
-    record.status = "awaiting_approval";
+    if (proposal.worktreePath) {
+      removals.push(proposal.worktreePath);
+      proposal.worktreePath = null;
+    }
     record.updatedAt = deps.now();
-    await saveEscalation(ctx, record);
-    await publishDocuments(ctx, record);
-    record.slack = await deps.postSlack(record);
-    record.updatedAt = deps.now();
-    await saveEscalation(ctx, record);
-  } finally {
-    finalizing.delete(record.id);
+  });
+  for (const worktreePath of removals) {
+    await deps.removeProposalWorktree(source, worktreePath);
+  }
+  if (updated && (updated.version ?? 0) !== before && !fanoutOpen.has(loaded.id)) {
+    await finalize(ctx, loaded.companyId, loaded.id, deps);
   }
 }
 
-async function checkDirty(deps: PipelineDeps, record: EscalationRecord, proposalCwd: string | null): Promise<{ dirty: boolean; error?: string }> {
-  const cwd = proposalCwd || record.cwd;
-  if (!cwd) return { dirty: false };
-  const current = await deps.readPorcelain(cwd);
-  return proposalDirtiedWorktree({
-    cwd,
-    baselineCwd: record.cwd,
-    baselinePorcelain: record.baselinePorcelain,
-    current,
+async function ingestProposal(ctx: PluginContext, activity: RunActivity, deps: PipelineDeps): Promise<void> {
+  const linked = await withRecordLock(`run:${activity.runId}`, async () => {
+    let record = await loadEscalationByProposalRun(ctx, activity.companyId, activity.runId);
+    if (!record) {
+      await saveEarlyProposal(ctx, activity);
+      record = await loadEscalationByProposalRun(ctx, activity.companyId, activity.runId);
+      if (!record) return false;
+      await takeEarlyProposal(ctx, activity.runId);
+    }
+    return true;
   });
+  if (linked) await applyProposal(ctx, activity, deps);
+}
+
+async function deliver(ctx: PluginContext, companyId: string, id: string, deps: PipelineDeps): Promise<void> {
+  if (delivering.has(id)) return;
+  delivering.add(id);
+  let retryIn: number | null = null;
+  try {
+    const record = await loadEscalation(ctx, companyId, id);
+    if (!record) return;
+    const retryable = record.status === "failed" && record.delivery?.retryable === true;
+    if (record.status !== "judging" && !retryable) return;
+    const config = parseEscalationConfig(await ctx.config.get());
+    const ready = record.proposals.filter((proposal) => proposal.status === "ready" && proposal.text);
+    try {
+      if (ready.length === 0) {
+        await updateRecord(ctx, companyId, id, (current) => {
+          current.status = "failed";
+          current.failureNote = current.failureNote && !current.failureNote.startsWith("Delivery failed")
+            ? current.failureNote
+            : "Every proposal was discarded or failed. Nothing was sent to the judge.";
+          current.updatedAt = deps.now();
+        });
+      } else if (!record.judge) {
+        const judged = await deps.judge(record, config.judgeModel);
+        await updateRecord(ctx, companyId, id, (current) => {
+          current.judge = { model: config.judgeModel, decision: judged.decision, reason: judged.reason };
+          current.status = "judging";
+          current.updatedAt = deps.now();
+        });
+      }
+      const latest = await loadEscalation(ctx, companyId, id);
+      if (!latest) return;
+      const posted = await deps.postSlack(latest);
+      const saved = await updateRecord(ctx, companyId, id, (current) => {
+        current.slack = posted;
+        current.status = current.judge ? "awaiting_approval" : "failed";
+        current.delivery = null;
+        current.updatedAt = deps.now();
+      });
+      if (saved) await publishDocuments(ctx, saved);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "delivery failed";
+      const attempt = (record.delivery?.attempt ?? 0) + 1;
+      const terminal = attempt >= DELIVERY_MAX_ATTEMPTS;
+      const phase = record.judge || ready.length === 0 ? "slack" : "judge";
+      await updateRecord(ctx, companyId, id, (current) => {
+        current.status = "failed";
+        current.failureNote = terminal
+          ? `Delivery failed: ${message}`
+          : `Delivery failed (attempt ${attempt}/${DELIVERY_MAX_ATTEMPTS}): ${message}`;
+        current.delivery = { phase, attempt, retryable: !terminal, lastError: message };
+        current.updatedAt = deps.now();
+      });
+      const visible = await loadEscalation(ctx, companyId, id);
+      if (visible) await publishDocuments(ctx, visible);
+      if (!terminal) retryIn = backoffMs(attempt);
+    }
+  } finally {
+    delivering.delete(id);
+  }
+  if (retryIn != null) {
+    await deps.schedule(retryIn, () => deliver(ctx, companyId, id, deps));
+  }
+}
+
+async function finalize(ctx: PluginContext, companyId: string, id: string, deps: PipelineDeps): Promise<void> {
+  const next = await updateRecord(ctx, companyId, id, (record) => {
+    if (record.proposals.some((proposal) => proposal.status === "pending")) return false;
+    if (record.status !== "fanning_out") return false;
+    record.status = "judging";
+    record.updatedAt = deps.now();
+  });
+  if (!next || next.status !== "judging") return;
+  await deliver(ctx, companyId, id, deps);
+}
+
+async function expirePending(ctx: PluginContext, companyId: string, id: string, deps: PipelineDeps): Promise<void> {
+  const loaded = await loadEscalation(ctx, companyId, id);
+  if (!loaded) return;
+  const removals: string[] = [];
+  const before = loaded.version ?? 0;
+  const updated = await updateRecord(ctx, companyId, id, (record) => {
+    let any = false;
+    for (const proposal of record.proposals) {
+      if (proposal.status !== "pending") continue;
+      proposal.status = "failed";
+      proposal.error = "Proposal timed out";
+      if (proposal.worktreePath) {
+        removals.push(proposal.worktreePath);
+        proposal.worktreePath = null;
+      }
+      any = true;
+    }
+    if (!any) return false;
+    record.proposalDeadlineAt = null;
+    record.updatedAt = deps.now();
+  });
+  for (const worktreePath of removals) {
+    await deps.removeProposalWorktree(loaded.cwd, worktreePath);
+  }
+  if (updated && (updated.version ?? 0) !== before && !fanoutOpen.has(id)) {
+    await finalize(ctx, companyId, id, deps);
+  }
+}
+
+export async function resumeEscalations(ctx: PluginContext, deps: PipelineDeps = resolveDeps(ctx)): Promise<void> {
+  const config = parseEscalationConfig(await ctx.config.get());
+  if (!config.enabled) return;
+  const pending = await listPendingDeliveries(ctx);
+  for (const ref of pending) {
+    const record = await loadEscalation(ctx, ref.companyId, ref.id);
+    if (!record) {
+      await rememberPendingDelivery(ctx, ref.companyId, ref.id, false);
+      continue;
+    }
+    if (record.proposals.some((proposal) => proposal.status === "pending")) {
+      if (record.proposalDeadlineAt && Date.parse(record.proposalDeadlineAt) <= Date.parse(deps.now())) {
+        await expirePending(ctx, ref.companyId, ref.id, deps);
+      } else {
+        armTimeout(ctx, record, deps, config.proposalTimeoutSec);
+      }
+    }
+    const fresh = await loadEscalation(ctx, ref.companyId, ref.id);
+    if (!fresh) continue;
+    if (fresh.status === "judging" || (fresh.status === "failed" && fresh.delivery?.retryable)) {
+      await deliver(ctx, ref.companyId, ref.id, deps);
+    }
+  }
 }
 
 export async function handleRunEvent(ctx: PluginContext, event: PluginEvent, deps: PipelineDeps = resolveDeps(ctx)): Promise<void> {
   const config = parseEscalationConfig(await ctx.config.get());
   if (!config.enabled) return;
+  await resumeEscalations(ctx, deps);
   const activity = parseRunActivity(event);
   if (!activity) return;
 
@@ -237,16 +455,21 @@ async function startEscalation(ctx: PluginContext, failure: RunActivity, deps: P
   const existing = await loadEscalationByFailedRun(ctx, failure.companyId, failure.runId);
   if (existing) return;
   const config = parseEscalationConfig(await ctx.config.get());
-  const candidates = selectNextHarnesses(failure.adapterType, config.harnessOrder, config.fanoutCount);
+  const failedHarness = resolveFailedHarness({
+    adapterType: failure.adapterType,
+    agentId: failure.agentId,
+    harnessAgents: config.harnessAgents,
+    order: config.harnessOrder,
+  });
+  const candidates = selectNextHarnesses(failedHarness, config.harnessOrder, config.fanoutCount);
   const now = deps.now();
-  const baseline = failure.cwd ? await deps.readPorcelain(failure.cwd) : null;
   const record: EscalationRecord = {
     id: randomUUID(),
     companyId: failure.companyId,
     issueId: failure.issueId,
     failedRunId: failure.runId,
     failedAgentId: failure.agentId,
-    failedAdapterType: failure.adapterType,
+    failedAdapterType: failedHarness,
     error: failure.error,
     errorCode: failure.errorCode,
     stdoutExcerpt: failure.stdoutExcerpt,
@@ -255,7 +478,7 @@ async function startEscalation(ctx: PluginContext, failure: RunActivity, deps: P
     repoRef: failure.repoRef,
     branchName: failure.branchName,
     cwd: failure.cwd,
-    baselinePorcelain: baseline && baseline.ok ? baseline.porcelain : null,
+    baselinePorcelain: null,
     candidates,
     proposals: [],
     judge: null,
@@ -263,83 +486,114 @@ async function startEscalation(ctx: PluginContext, failure: RunActivity, deps: P
     slack: null,
     decision: null,
     failureNote: null,
+    version: 1,
+    delivery: null,
+    proposalDeadlineAt: null,
     createdAt: now,
     updatedAt: now,
   };
+  await saveEscalation(ctx, record);
+  await syncPending(ctx, record);
+  fanoutOpen.add(record.id);
+  const failureForPrompt: RunActivity = { ...failure, adapterType: failedHarness };
+  let timeoutArmedForRecord = false;
 
+  try {
   for (const harness of candidates) {
     const agentId = config.harnessAgents[harness as keyof typeof config.harnessAgents] ?? "";
     if (!agentId) {
-      record.proposals.push(slot(harness, null, "failed", "Proposal agent is not configured"));
+      await updateRecord(ctx, record.companyId, record.id, (current) => {
+        current.proposals.push(slot(harness, null, "failed", "Proposal agent is not configured"));
+        current.updatedAt = deps.now();
+      });
       continue;
     }
-    try {
-      const invoked = await ctx.agents.invoke(agentId, failure.companyId, {
-        prompt: buildProposalPrompt(failure, harness),
-        reason: PROPOSAL_WAKE_REASON,
-        issueId: failure.issueId ?? undefined,
+    if (!failure.cwd) {
+      await updateRecord(ctx, record.companyId, record.id, (current) => {
+        current.proposals.push(slot(harness, agentId, "failed", "No workspace cwd; proposal was not started"));
+        current.updatedAt = deps.now();
       });
-      record.proposals.push({
-        ...slot(harness, agentId, "pending", null),
-        runId: invoked.runId,
+      continue;
+    }
+    const tree = await deps.createProposalWorktree(failure.cwd);
+    if (!tree.ok) {
+      await updateRecord(ctx, record.companyId, record.id, (current) => {
+        current.proposals.push(slot(harness, agentId, "failed", tree.error));
+        current.updatedAt = deps.now();
+      });
+      continue;
+    }
+    let invoked: { runId: string };
+    try {
+      invoked = await ctx.agents.invoke(agentId, failure.companyId, {
+        prompt: buildProposalPrompt(failureForPrompt, harness),
+        reason: PROPOSAL_WAKE_REASON,
+        taskKey: `error-escalation:${record.id}:${harness}`,
+        escalationCwd: tree.path,
       });
     } catch (error) {
-      record.proposals.push(slot(
-        harness,
-        agentId,
-        "failed",
-        error instanceof Error ? error.message : "invoke failed",
-      ));
+      await deps.removeProposalWorktree(failure.cwd, tree.path);
+      await updateRecord(ctx, record.companyId, record.id, (current) => {
+        current.proposals.push(slot(
+          harness,
+          agentId,
+          "failed",
+          error instanceof Error ? error.message : "invoke failed",
+        ));
+        current.updatedAt = deps.now();
+      });
+      continue;
     }
+    let early: RunActivity | null = null;
+    await withRecordLock(`run:${invoked.runId}`, async () => {
+      await updateRecord(ctx, record.companyId, record.id, (current) => {
+        current.proposals.push({
+          ...slot(harness, agentId, "pending", null),
+          runId: invoked.runId,
+          worktreePath: tree.path,
+          baselineHead: tree.head,
+          baselinePorcelain: tree.porcelain,
+        });
+        if (config.proposalTimeoutSec > 0 && !current.proposalDeadlineAt) {
+          const deadline = Date.parse(deps.now()) + config.proposalTimeoutSec * 1000;
+          if (Number.isFinite(deadline)) current.proposalDeadlineAt = new Date(deadline).toISOString();
+        }
+        current.updatedAt = deps.now();
+      });
+      early = await takeEarlyProposal<RunActivity>(ctx, invoked.runId);
+    });
+    if (!timeoutArmedForRecord && config.proposalTimeoutSec > 0) {
+      timeoutArmedForRecord = true;
+      const saved = await loadEscalation(ctx, record.companyId, record.id);
+      if (saved) armTimeout(ctx, saved, deps, config.proposalTimeoutSec);
+    }
+    if (early) await applyProposal(ctx, early, deps);
   }
-
-  record.updatedAt = deps.now();
-  await saveEscalation(ctx, record);
-  await finalize(ctx, record, deps);
-}
-
-async function ingestProposal(ctx: PluginContext, activity: RunActivity, deps: PipelineDeps): Promise<void> {
-  const record = await loadEscalationByProposalRun(ctx, activity.companyId, activity.runId);
-  if (!record) return;
-  const proposal = record.proposals.find((entry) => entry.runId === activity.runId);
-  if (!proposal || proposal.status !== "pending") return;
-
-  if (activity.eventType === "agent.run.cancelled" || activity.eventType === "agent.run.failed") {
-    proposal.status = "failed";
-    proposal.error = activity.error ?? activity.status;
-    record.updatedAt = deps.now();
-    await saveEscalation(ctx, record);
-    await finalize(ctx, record, deps);
-    return;
+  } finally {
+    fanoutOpen.delete(record.id);
   }
-
-  const dirty = await checkDirty(deps, record, activity.cwd);
-  if (dirty.dirty) {
-    proposal.status = "discarded";
-    proposal.discarded = true;
-    proposal.dirty = true;
-    proposal.discardReason = dirty.error ?? "Workspace was dirty after the proposal run";
-    proposal.text = null;
-  } else {
-    proposal.status = "ready";
-    proposal.text = activity.stdoutExcerpt || activity.stderrExcerpt || "(no output)";
-  }
-  record.updatedAt = deps.now();
-  await saveEscalation(ctx, record);
-  await finalize(ctx, record, deps);
+  await finalize(ctx, record.companyId, record.id, deps);
 }
 
 function decisionMatches(record: EscalationRecord, channelId: string, messageTs: string, approverUserId: string, actorId: string): string | null {
   if (!record.slack) return "Escalation has no Slack message";
   if (record.slack.channel !== channelId || record.slack.ts !== messageTs) return "Slack channel or timestamp does not match";
-  if (approverUserId && actorId !== approverUserId) return "Only the configured approver can decide";
+  if (!approverUserId.trim()) return "approver is not configured";
+  if (actorId !== approverUserId) return "Only the configured approver can decide";
   return null;
 }
 
 export async function applySlackIntent(ctx: PluginContext, intent: SlackIntent, deps: PipelineDeps = resolveDeps(ctx)): Promise<{ applied: boolean; reason?: string }> {
   const config = parseEscalationConfig(await ctx.config.get());
   if (intent.type === "ignore") return { applied: false, reason: "ignored" };
+  if (!config.slackApproverUserId.trim()) {
+    return { applied: false, reason: "approver is not configured" };
+  }
+
   if (intent.type === "open_reject_modal") {
+    if (config.slackChannelId && intent.channelId !== config.slackChannelId) {
+      return { applied: false, reason: "channel mismatch" };
+    }
     const loaded = await findEscalationById(ctx, intent.escalationId);
     if (!loaded) return { applied: false, reason: "missing" };
     const mismatch = decisionMatches(loaded, intent.channelId, intent.messageTs, config.slackApproverUserId, intent.userId);
@@ -354,32 +608,34 @@ export async function applySlackIntent(ctx: PluginContext, intent: SlackIntent, 
     return { applied: true };
   }
 
-  let record: EscalationRecord | null = null;
   let outcome: "approved" | "rejected" | null = null;
   let reason: string | null = null;
   let actorId = "";
   let channelId = "";
   let messageTs = "";
+  let escalationId = "";
 
   if (intent.type === "approve" || intent.type === "reject") {
-    record = await findEscalationById(ctx, intent.escalationId);
     outcome = intent.type === "approve" ? "approved" : "rejected";
     reason = intent.reason;
     actorId = intent.userId;
     channelId = intent.channelId;
     messageTs = intent.messageTs;
+    escalationId = intent.escalationId;
   } else if (intent.type === "thread_reply") {
     channelId = intent.channelId;
     messageTs = intent.threadTs;
     actorId = intent.userId;
     outcome = intent.outcome;
     reason = intent.reason;
-    record = await findEscalationBySlackMessage(ctx, intent.channelId, intent.threadTs);
   }
 
   if (config.slackChannelId && channelId !== config.slackChannelId) {
     return { applied: false, reason: "channel mismatch" };
   }
+  const record = escalationId
+    ? await findEscalationById(ctx, escalationId)
+    : await findEscalationBySlackMessage(ctx, channelId, messageTs);
   if (!record || !outcome) return { applied: false, reason: "missing" };
   const mismatch = decisionMatches(record, channelId, messageTs, config.slackApproverUserId, actorId);
   if (mismatch) {
@@ -388,21 +644,33 @@ export async function applySlackIntent(ctx: PluginContext, intent: SlackIntent, 
     }
     return { applied: false, reason: mismatch };
   }
-  if (record.status !== "awaiting_approval") {
-    return { applied: false, reason: "already decided" };
-  }
+
+  let applied = false;
+  let failure = "already decided";
+  const saved = await updateRecord(ctx, record.companyId, record.id, (current) => {
+    const currentMismatch = decisionMatches(current, channelId, messageTs, config.slackApproverUserId, actorId);
+    if (currentMismatch) {
+      failure = currentMismatch;
+      return false;
+    }
+    if (current.status !== "awaiting_approval") {
+      failure = "already decided";
+      return false;
+    }
+    current.status = outcome;
+    current.decision = { outcome, actorId, reason, at: deps.now() };
+    current.updatedAt = deps.now();
+    applied = true;
+  });
+  if (!applied || !saved) return { applied: false, reason: failure };
   await noteApplyFlags(ctx);
-  record.status = outcome;
-  record.decision = { outcome, actorId, reason, at: deps.now() };
-  record.updatedAt = deps.now();
-  await saveEscalation(ctx, record);
-  await deps.updateSlack(record);
+  await deps.updateSlack(saved);
   await comment(
     ctx,
-    record,
+    saved,
     outcome === "approved"
-      ? `Dan approved escalation ${record.id}. Nothing was written.`
-      : `Dan rejected escalation ${record.id}.${reason ? ` Reason: ${reason}` : ""}`,
+      ? `Dan approved escalation ${saved.id}. Nothing was written.`
+      : `Dan rejected escalation ${saved.id}.${reason ? ` Reason: ${reason}` : ""}`,
   );
   return { applied: true };
 }
