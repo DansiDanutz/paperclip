@@ -994,9 +994,9 @@ describe("company portability", () => {
 
     const previousGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
     const previousGitConfigSystem = process.env.GIT_CONFIG_SYSTEM;
-    // `git remote get-url` applies global url.*.insteadOf. This VM rewrites
-    // https://github.com/ to an authenticated host, which is not the remote
-    // stored in the checkout. Ignore global and system git config for the export.
+    // `git remote get-url` applies global url.*.insteadOf. That rewrite is not
+    // the remote stored in the checkout, so this case ignores global and system
+    // git config while it exports.
     process.env.GIT_CONFIG_GLOBAL = "/dev/null";
     process.env.GIT_CONFIG_SYSTEM = "/dev/null";
     try {
