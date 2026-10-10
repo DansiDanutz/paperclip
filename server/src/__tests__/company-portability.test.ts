@@ -992,20 +992,34 @@ describe("company portability", () => {
       },
     ]);
 
-    const exported = await portability.exportBundle("company-1", {
-      include: {
-        company: false,
-        agents: false,
-        projects: true,
-        issues: true,
-      },
-    });
+    const previousGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
+    const previousGitConfigSystem = process.env.GIT_CONFIG_SYSTEM;
+    // `git remote get-url` applies global url.*.insteadOf. This VM rewrites
+    // https://github.com/ to an authenticated host, which is not the remote
+    // stored in the checkout. Ignore global and system git config for the export.
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    try {
+      const exported = await portability.exportBundle("company-1", {
+        include: {
+          company: false,
+          agents: false,
+          projects: true,
+          issues: true,
+        },
+      });
 
-    const extension = asTextFile(exported.files[".paperclip.yaml"]);
-    expect(extension).toContain('repoUrl: "https://github.com/paperclipai/paperclip.git"');
-    expect(extension).toContain('projectWorkspaceKey: "paperclip"');
-    expect(exported.warnings).not.toContainEqual(expect.stringContaining("does not have a portable repoUrl"));
-    expect(exported.warnings).not.toContainEqual(expect.stringContaining("reference workspace workspace-1"));
+      const extension = asTextFile(exported.files[".paperclip.yaml"]);
+      expect(extension).toContain('repoUrl: "https://github.com/paperclipai/paperclip.git"');
+      expect(extension).toContain('projectWorkspaceKey: "paperclip"');
+      expect(exported.warnings).not.toContainEqual(expect.stringContaining("does not have a portable repoUrl"));
+      expect(exported.warnings).not.toContainEqual(expect.stringContaining("reference workspace workspace-1"));
+    } finally {
+      if (previousGitConfigGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previousGitConfigGlobal;
+      if (previousGitConfigSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+      else process.env.GIT_CONFIG_SYSTEM = previousGitConfigSystem;
+    }
   });
 
   it("collapses repeated task workspace warnings into one summary per missing workspace", async () => {

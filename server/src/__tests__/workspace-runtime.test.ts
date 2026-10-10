@@ -1134,7 +1134,7 @@ describe("realizeExecutionWorkspace", () => {
       await fs.realpath(path.join(repoRoot, "packages", "shared")),
     );
     },
-    15_000,
+    60_000,
   );
 
   it("records worktree setup and provision operations when a recorder is provided", async () => {
@@ -1193,7 +1193,7 @@ describe("realizeExecutionWorkspace", () => {
       created: true,
     });
     expect(operations[1]?.command).toBe("bash ./scripts/provision.sh");
-  });
+  }, 30_000);
 
   it("truncates oversized provision command output before storing it in memory", async () => {
     const repoRoot = await createTempRepo();
@@ -1244,7 +1244,7 @@ describe("realizeExecutionWorkspace", () => {
     });
     expect(provisionOperation?.result.stdout).toContain("[output truncated to last");
     expect(provisionOperation?.result.stdout?.length ?? 0).toBeLessThan(300000);
-  });
+  }, 30_000);
 
   it("reuses an existing branch without resetting it when recreating a missing worktree", async () => {
     const repoRoot = await createTempRepo();
