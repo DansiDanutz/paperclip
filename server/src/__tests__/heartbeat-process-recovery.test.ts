@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   agentWakeupRequests,
   companies,
@@ -135,6 +136,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
     cleanupPids.clear();
     await db.delete(issues);
+    await db.delete(activityLog);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
