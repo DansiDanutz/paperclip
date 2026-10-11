@@ -1550,6 +1550,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           };
         },
       },
+
+      runOutsideInvocation<T>(fn: () => T): T {
+        return invocationContextStorage.exit(fn);
+      },
     };
   }
 

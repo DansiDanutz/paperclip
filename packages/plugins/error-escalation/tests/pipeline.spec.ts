@@ -200,7 +200,14 @@ async function setup(config: Record<string, unknown> = baseConfig(), depPatch: P
     now: () => "2026-10-09T12:00:00.000Z",
     readPorcelain: async () => ({ ok: true, porcelain: "" }),
     readHead: async () => ({ ok: true, head: "abc123" }),
-    createProposalWorktree: async () => ({ ok: true, path: "/tmp/seme-isolated", head: "abc123", porcelain: "" }),
+    createProposalWorktree: async () => ({
+      ok: true,
+      path: "/tmp/seme-isolated",
+      head: "abc123",
+      porcelain: "",
+      contentHash: "hash-clean",
+    }),
+    readContentHash: async () => ({ ok: true, hash: "hash-clean" }),
     removeProposalWorktree: async () => {},
     schedule: (_ms, fn) => {
       scheduled.push(fn);
@@ -297,6 +304,7 @@ function readySlot(adapterType: string, text: string): EscalationRecord["proposa
     worktreePath: null,
     baselineHead: "abc123",
     baselinePorcelain: "",
+    baselineContentHash: "hash-clean",
   };
 }
 
@@ -446,7 +454,13 @@ describe("error escalation pipeline", () => {
 
   it("keeps an isolated worktree when the proposal does not change it", async () => {
     const { harness, invokes, judged } = await setup(baseConfig(), {
-      createProposalWorktree: async () => ({ ok: true, path: "/tmp/seme-isolated", head: "abc123", porcelain: " M already.ts" }),
+      createProposalWorktree: async () => ({
+        ok: true,
+        path: "/tmp/seme-isolated",
+        head: "abc123",
+        porcelain: " M already.ts",
+        contentHash: "hash-clean",
+      }),
       readPorcelain: async () => ({ ok: true, porcelain: " M already.ts" }),
       readHead: async () => ({ ok: true, head: "abc123" }),
     });
@@ -1081,13 +1095,79 @@ describe("error escalation pipeline", () => {
   });
 
   it("does not judge a fan-out that has not recorded every slot", async () => {
-    const { harness, judged } = await setup();
+    const { harness, invokes, judged } = await setup();
     const record = stuckFanout([]);
     await saveEscalation(harness.ctx, record);
     await rememberPendingDelivery(harness.ctx, COMPANY_ID, record.id, true);
     await resumeEscalations(harness.ctx);
     expect(judged).toHaveLength(0);
-    expect((await currentEscalation(harness))?.status).toBe("fanning_out");
+    const saved = await currentEscalation(harness);
+    expect(saved?.status).toBe("fanning_out");
+    expect(invokes).toHaveLength(2);
+    expect(saved?.proposals).toHaveLength(2);
+    expect(saved?.proposals.every((proposal) => proposal.status === "pending")).toBe(true);
+  });
+
+  it("starts missing slots again when the failed run is delivered after a restart", async () => {
+    const { harness, invokes } = await setup();
+    const record = stuckFanout([]);
+    record.failedRunId = "run-redeliver";
+    await saveEscalation(harness.ctx, record);
+    await emit(harness, "agent.run.failed", failurePayload({ runId: "run-redeliver" }));
+    const saved = await currentEscalation(harness);
+    expect(invokes).toHaveLength(2);
+    expect(saved?.proposals).toHaveLength(2);
+    expect(saved?.status).toBe("fanning_out");
+    expect(saved?.proposals.every((proposal) => proposal.status === "pending")).toBe(true);
+  });
+
+  it("keeps going when invoke fails and worktree cleanup also throws", async () => {
+    let removals = 0;
+    const { harness, invokes } = await setup(baseConfig(), {
+      removeProposalWorktree: async () => {
+        removals += 1;
+        throw new Error("cleanup failed");
+      },
+    });
+    const wrapped = harness.ctx.agents.invoke.bind(harness.ctx.agents);
+    let attempts = 0;
+    harness.ctx.agents.invoke = async (agentId, companyId, opts) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("invoke failed");
+      return wrapped(agentId, companyId, opts);
+    };
+    await emit(harness, "agent.run.failed", failurePayload({ runId: "cleanup-invoke" }));
+    const record = await currentEscalation(harness);
+    expect(removals).toBe(1);
+    expect(record?.proposals).toHaveLength(2);
+    expect(record?.proposals[0]?.status).toBe("failed");
+    expect(record?.proposals[0]?.error).toBe("invoke failed");
+    expect(record?.proposals[1]?.status).toBe("pending");
+    expect(invokes).toHaveLength(1);
+  });
+
+  it("judges the extracted final answer instead of the raw output tail", async () => {
+    const answer = "Opening explanation of the fix.\n\ndiff --git a/src/a.ts b/src/a.ts\n+the rest of the answer";
+    const { harness, invokes, judged } = await setup();
+    await emit(harness, "agent.run.failed", failurePayload({ runId: "summary-run" }));
+    await emit(harness, "agent.run.finished", {
+      runId: invokes[0]!.runId,
+      agentId: CODEX_ID,
+      status: "succeeded",
+      escalationProposal: true,
+      stdoutExcerpt: "TAIL-ONLY",
+      resultSummary: answer,
+    });
+    await emit(harness, "agent.run.finished", {
+      runId: invokes[1]!.runId,
+      agentId: GROK_ID,
+      status: "succeeded",
+      escalationProposal: true,
+      stdoutExcerpt: "TAIL-ONLY",
+      resultSummary: answer,
+    });
+    expect(judged).toHaveLength(1);
+    expect(judged[0]?.record.proposals.map((proposal) => proposal.text)).toEqual([answer, answer]);
   });
 
   it("escalates only companies listed in companyIds", async () => {

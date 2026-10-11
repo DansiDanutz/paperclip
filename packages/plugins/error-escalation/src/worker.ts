@@ -8,22 +8,27 @@ let stopSocket: (() => void) | null = null;
 let hostCtx: PluginContext | null = null;
 let socketState: SocketConnectionState = "off";
 
-async function startSocket(ctx: PluginContext, config: EscalationConfig) {
+async function startSocket(ctx: PluginContext, config: EscalationConfig, companyId: string | null) {
   if (!config.slackAppTokenSecretId || !config.slackBotTokenSecretId) {
     socketState = "off";
     return;
   }
-  const appToken = await ctx.secrets.resolve(config.slackAppTokenSecretId);
+  const appToken = await ctx.secrets.resolve(
+    config.slackAppTokenSecretId,
+    companyId ? { companyId } : undefined,
+  );
   stopSocket?.();
   socketState = "connecting";
-  stopSocket = startSlackSocket({
+  // The socket outlives configChanged. Starting it inside that invocation would
+  // stamp every later approve/reject with an id the host has already dropped.
+  stopSocket = ctx.runOutsideInvocation(() => startSlackSocket({
     appToken,
     transport: { fetch: (url, init) => ctx.http.fetch(url, init) },
     onEnvelope: (envelope) => handleSlackEnvelope(ctx, envelope, resolveDeps(ctx)),
     onState: (state) => {
       socketState = state;
     },
-  }).stop;
+  })).stop;
 }
 
 const plugin = definePlugin({
@@ -69,13 +74,13 @@ const plugin = definePlugin({
 
   async onConfigChanged(newConfig, context) {
     const config = parseEscalationConfig(newConfig);
-    setActiveEscalationConfig(config);
+    const companyId = context?.companyId ?? null;
+    setActiveEscalationConfig(config, companyId);
     stopSocket?.();
     stopSocket = null;
     socketState = "off";
     if (!hostCtx) return;
-    await startSocket(hostCtx, config);
-    const companyId = context?.companyId ?? undefined;
+    await startSocket(hostCtx, config, companyId);
     if (companyId && companyAllowed(config, companyId)) {
       await resumeEscalations(hostCtx, resolveDeps(hostCtx), companyId);
     }

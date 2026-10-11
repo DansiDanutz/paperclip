@@ -2240,4 +2240,12 @@ export interface PluginContext {
   /** Tracer for provider spans. The default is a no-op; the host records a span
    * only when tracing is on and an active host trace context is present. */
   tracer: PluginTracer;
+
+  /**
+   * Run a callback outside the host invocation that is currently on the stack.
+   * Socket Mode listeners and timers must use this. A callback created inside
+   * `configChanged` otherwise keeps sending that call's id after the host has
+   * retired it, and company-scoped reads then fail.
+   */
+  runOutsideInvocation<T>(fn: () => T): T;
 }

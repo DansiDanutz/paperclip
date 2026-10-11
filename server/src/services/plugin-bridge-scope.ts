@@ -7,24 +7,23 @@ function readCompanyId(value: unknown): string | null {
 }
 
 /**
- * Authorize one company for a plugin data/action call.
+ * Read the company a plugin data/action call is allowed to use.
  *
- * The route used to check only the top-level `companyId` and then forward
- * `params` unchanged. A board user limited to company A could pass A at the
- * top level and company B inside `params`.
+ * Authorization uses the top-level `companyId` only. The route checks that id
+ * against the actor, then action handlers overwrite `params.companyId` with it.
+ * A nested id that names another company is replaced here when the caller
+ * already supplied one, and is not promoted into the authorized scope. Params
+ * that do not name a company are left unchanged so data calls keep their body.
  */
 export function resolvePluginBridgeCompanyScope(body: {
   companyId?: unknown;
   params?: Record<string, unknown> | null;
 } | null | undefined): PluginBridgeCompanyScope {
   const source = body ?? {};
-  const top = readCompanyId(source.companyId);
+  const companyId = readCompanyId(source.companyId);
   const params: Record<string, unknown> = { ...(source.params ?? {}) };
-  const nested = readCompanyId(params.companyId);
-  if (top && nested && top !== nested) {
-    return { ok: false, error: "Company scope mismatch" };
+  if (companyId && readCompanyId(params.companyId)) {
+    params.companyId = companyId;
   }
-  const companyId = top ?? nested;
-  if (companyId) params.companyId = companyId;
   return { ok: true, companyId, params };
 }

@@ -22,6 +22,7 @@ export interface ProposalSlot {
   worktreePath: string | null;
   baselineHead: string | null;
   baselinePorcelain: string | null;
+  baselineContentHash: string | null;
 }
 
 export interface DeliveryState {
@@ -72,18 +73,29 @@ function scope(companyId: string, stateKey: string) {
   return { scopeKind: "company" as const, scopeId: companyId, stateKey };
 }
 
+async function rememberIssueEscalation(
+  ctx: PluginContext,
+  companyId: string,
+  issueId: string,
+  escalationId: string,
+): Promise<void> {
+  await withRecordLock(`issue:${companyId}:${issueId}`, async () => {
+    const key = scope(companyId, `issue:${issueId}`);
+    const existing = await ctx.state.get(key);
+    const ids = Array.isArray(existing) ? existing.filter((entry): entry is string => typeof entry === "string") : [];
+    if (!ids.includes(escalationId)) {
+      ids.push(escalationId);
+      await ctx.state.set(key, ids);
+    }
+  });
+}
+
 export async function saveEscalation(ctx: PluginContext, record: EscalationRecord): Promise<void> {
   await ctx.state.set(scope(record.companyId, `escalation:${record.id}`), record);
   await ctx.state.set({ scopeKind: "instance", stateKey: `id:${record.id}` }, record.companyId);
   await ctx.state.set(scope(record.companyId, `by-run:${record.failedRunId}`), record.id);
   if (record.issueId) {
-    const key = scope(record.companyId, `issue:${record.issueId}`);
-    const existing = await ctx.state.get(key);
-    const ids = Array.isArray(existing) ? existing.filter((entry): entry is string => typeof entry === "string") : [];
-    if (!ids.includes(record.id)) {
-      ids.push(record.id);
-      await ctx.state.set(key, ids);
-    }
+    await rememberIssueEscalation(ctx, record.companyId, record.issueId, record.id);
   }
   for (const proposal of record.proposals) {
     if (proposal.runId) {

@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -60,9 +61,12 @@ export async function readHead(cwd: string): Promise<{ ok: true; head: string } 
 export function proposalChangedIsolation(input: {
   baselineHead: string | null;
   baselinePorcelain: string | null;
+  baselineContentHash?: string | null;
   currentHead: string | null;
   current: PorcelainResult | null;
+  currentContentHash?: string | null;
   headError?: string | null;
+  contentHashError?: string | null;
 }): { dirty: boolean; error?: string } {
   if (!input.current || !input.current.ok) {
     return {
@@ -76,6 +80,14 @@ export function proposalChangedIsolation(input: {
   if (input.baselineHead && input.currentHead !== input.baselineHead) {
     return { dirty: true, error: "Proposal commit changed HEAD" };
   }
+  if (input.baselineContentHash) {
+    if (!input.currentContentHash) {
+      return { dirty: true, error: input.contentHashError ?? "Could not hash proposal contents" };
+    }
+    if (input.currentContentHash !== input.baselineContentHash) {
+      return { dirty: true, error: "Proposal changed file contents" };
+    }
+  }
   if (input.baselinePorcelain != null && input.current.porcelain !== input.baselinePorcelain) {
     return { dirty: true, error: "Workspace changed during the proposal" };
   }
@@ -86,8 +98,39 @@ export function proposalChangedIsolation(input: {
 }
 
 export type ProposalWorktree =
-  | { ok: true; path: string; head: string; porcelain: string }
+  | { ok: true; path: string; head: string; porcelain: string; contentHash: string }
   | { ok: false; error: string };
+
+export async function readWorktreeContentHash(
+  cwd: string,
+): Promise<{ ok: true; hash: string } | { ok: false; error: string }> {
+  try {
+    const { stdout: diff } = await execFileAsync("git", ["diff", "--binary", "HEAD"], {
+      cwd,
+      maxBuffer: DIFF_MAX_BUFFER,
+      encoding: "buffer",
+    });
+    const { stdout: untracked } = await execFileAsync(
+      "git",
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      { cwd, maxBuffer: DIFF_MAX_BUFFER },
+    );
+    const hash = createHash("sha256");
+    hash.update(diff);
+    hash.update("\0");
+    const rels = untracked.split("\0").filter((rel) => safeRelative(rel)).sort();
+    for (const rel of rels) {
+      const bytes = await readFile(path.join(cwd, rel));
+      hash.update(rel);
+      hash.update("\0");
+      hash.update(bytes);
+      hash.update("\0");
+    }
+    return { ok: true, hash: hash.digest("hex") };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "content hash failed" };
+  }
+}
 
 const DIFF_MAX_BUFFER = 64 * 1024 * 1024;
 
@@ -150,11 +193,25 @@ export async function createProposalWorktree(sourceCwd: string): Promise<Proposa
     await materializeSourceSnapshot(sourceCwd, destination);
     const head = await readHead(destination);
     const porcelain = await readPorcelain(destination);
-    if (!head.ok || !porcelain.ok) {
+    const content = await readWorktreeContentHash(destination);
+    if (!head.ok || !porcelain.ok || !content.ok) {
       await removeProposalWorktree(sourceCwd, destination);
-      return { ok: false, error: !head.ok ? head.error : porcelain.ok ? "worktree snapshot failed" : porcelain.error };
+      const error = !head.ok
+        ? head.error
+        : !porcelain.ok
+          ? porcelain.error
+          : !content.ok
+            ? content.error
+            : "worktree snapshot failed";
+      return { ok: false, error };
     }
-    return { ok: true, path: destination, head: head.head, porcelain: porcelain.porcelain };
+    return {
+      ok: true,
+      path: destination,
+      head: head.head,
+      porcelain: porcelain.porcelain,
+      contentHash: content.hash,
+    };
   } catch (error) {
     if (destination) await removeProposalWorktree(sourceCwd, destination);
     return { ok: false, error: error instanceof Error ? error.message : "git worktree add failed" };

@@ -14,6 +14,7 @@ export interface RunActivity {
   escalationProposal: boolean;
   stdoutExcerpt: string | null;
   stderrExcerpt: string | null;
+  resultSummary: string | null;
   repoUrl: string | null;
   repoRef: string | null;
   branchName: string | null;
@@ -53,6 +54,7 @@ export function parseRunActivity(event: {
     escalationProposal: payload.escalationProposal === true || wakeReason === PROPOSAL_WAKE_REASON,
     stdoutExcerpt: typeof payload.stdoutExcerpt === "string" ? payload.stdoutExcerpt : null,
     stderrExcerpt: typeof payload.stderrExcerpt === "string" ? payload.stderrExcerpt : null,
+    resultSummary: text(payload.resultSummary),
     repoUrl: text(payload.repoUrl),
     repoRef: text(payload.repoRef),
     branchName: text(payload.branchName),

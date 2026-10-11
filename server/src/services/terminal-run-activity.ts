@@ -43,6 +43,16 @@ export function isEscalationProposalWake(context: Record<string, unknown> | null
   return readNonEmptyString(context?.wakeReason) === ERROR_ESCALATION_PROPOSAL_WAKE_REASON;
 }
 
+/**
+ * The adapter's extracted final answer, stored on the run as `summary` or
+ * `result`. This is the text a judge should see. It is not the raw stdout tail.
+ */
+export function readRunResultSummary(resultJson: unknown): string | null {
+  if (!resultJson || typeof resultJson !== "object" || Array.isArray(resultJson)) return null;
+  const record = resultJson as Record<string, unknown>;
+  return readNonEmptyString(record.summary) ?? readNonEmptyString(record.result);
+}
+
 export function truncateActivityExcerpt(value: string | null | undefined): string | null {
   if (typeof value !== "string" || value.length === 0) return null;
   if (value.length <= TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS) return value;
@@ -67,6 +77,7 @@ export interface TerminalRunActivityDetails {
   branchName: string | null;
   cwd: string | null;
   executionCwd: string | null;
+  resultSummary: string | null;
 }
 
 export function buildTerminalRunActivityDetails(input: {
@@ -79,6 +90,7 @@ export function buildTerminalRunActivityDetails(input: {
   exitCode: number | null;
   stdoutExcerpt: string | null;
   stderrExcerpt: string | null;
+  resultSummary?: string | null;
   contextSnapshot: Record<string, unknown> | null;
 }): TerminalRunActivityDetails {
   const context = input.contextSnapshot ?? {};
@@ -104,5 +116,6 @@ export function buildTerminalRunActivityDetails(input: {
     branchName: readNonEmptyString(workspace.branchName),
     cwd: readNonEmptyString(workspace.cwd),
     executionCwd: readNonEmptyString(context.paperclipExecutionCwd),
+    resultSummary: readNonEmptyString(input.resultSummary),
   };
 }

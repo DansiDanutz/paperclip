@@ -4,6 +4,7 @@ import {
   TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS,
   buildTerminalRunActivityDetails,
   isEscalationProposalWake,
+  readRunResultSummary,
   shouldPublishTerminalRunActivity,
   terminalRunActivityAction,
   truncateActivityExcerpt,
@@ -67,5 +68,15 @@ describe("terminal run activity", () => {
     expect(details.executionCwd).toBe("/tmp/paperclip-escalation/worktree");
     expect(details.stderrExcerpt?.endsWith("TAIL")).toBe(true);
     expect(details.stderrExcerpt?.length).toBe(TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS);
+  });
+
+  it("keeps the extracted final answer instead of a raw output tail", () => {
+    const answer = `${"Opening explanation. ".repeat(200)}diff --git a/src/a.ts`;
+    const tail = "x".repeat(TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS);
+    expect(readRunResultSummary({ summary: answer, result: "other", stdout: tail })).toBe(answer);
+    expect(readRunResultSummary({ result: answer, stdout: tail })).toBe(answer);
+    expect(readRunResultSummary({ stdout: tail })).toBeNull();
+    expect(answer.length).toBeGreaterThan(TERMINAL_RUN_ACTIVITY_EXCERPT_CHARS);
+    expect(readRunResultSummary({ summary: answer })?.startsWith("Opening explanation.")).toBe(true);
   });
 });

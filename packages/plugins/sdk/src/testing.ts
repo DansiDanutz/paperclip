@@ -2528,6 +2528,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     tracer: NOOP_PLUGIN_TRACER,
+    runOutsideInvocation(fn) {
+      return fn();
+    },
   };
 
   const harness: TestHarness = {

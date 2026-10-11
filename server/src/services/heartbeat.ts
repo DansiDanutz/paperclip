@@ -355,6 +355,7 @@ import {
 } from "./activity-log.js";
 import {
   buildTerminalRunActivityDetails,
+  readRunResultSummary,
   isEscalationProposalWake,
   shouldPublishTerminalRunActivity,
   terminalRunActivityAction,
@@ -649,6 +650,12 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
 const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
   "environment.lease_acquired",
   "environment.lease_released",
+  // Terminal run rows are lifecycle observations written for plugin listeners.
+  // Counting them as concrete progress would classify a plan-only run as
+  // advanced and skip its one bounded continuation.
+  "agent.run.finished",
+  "agent.run.failed",
+  "agent.run.cancelled",
 ];
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const EXTERNAL_ATTACHMENT_OMISSIONS_KEY = "externalAttachmentOmissions";
@@ -12950,6 +12957,7 @@ export function heartbeatService(
       stderrExcerpt:
         (typeof run.stderrExcerpt === "string" ? run.stderrExcerpt : null) ??
         (typeof resultJson.stderr === "string" ? resultJson.stderr : null),
+      resultSummary: readRunResultSummary(resultJson),
       contextSnapshot: context,
     });
     const eventType =
@@ -12972,6 +12980,7 @@ export function heartbeatService(
       escalationProposal: details.escalationProposal,
       stdoutExcerpt: details.stdoutExcerpt,
       stderrExcerpt: details.stderrExcerpt,
+      resultSummary: details.resultSummary,
       repoUrl: details.repoUrl,
       repoRef: details.repoRef,
       branchName: details.branchName,

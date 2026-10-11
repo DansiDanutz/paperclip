@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
-import { createProposalWorktree, proposalChangedIsolation, proposalDirtiedWorktree, readHead, readPorcelain, removeProposalWorktree } from "../src/git.js";
+import { createProposalWorktree, proposalChangedIsolation, proposalDirtiedWorktree, readHead, readPorcelain, readWorktreeContentHash, removeProposalWorktree } from "../src/git.js";
 
 function gitRepo(): string {
   const cwd = mkdtempSync(path.join(tmpdir(), "escalation-git-"));
@@ -95,11 +95,14 @@ describe("dirty worktree backstop", () => {
     expect(readFileSync(path.join(created.path, "untracked.js"), "utf8")).toContain("untracked-fail");
     expect(created.porcelain.length).toBeGreaterThan(0);
     const unchanged = await readPorcelain(created.path);
+    const unchangedHash = await readWorktreeContentHash(created.path);
     expect(proposalChangedIsolation({
       baselineHead: created.head,
       baselinePorcelain: created.porcelain,
+      baselineContentHash: created.contentHash,
       currentHead: created.head,
       current: unchanged,
+      currentContentHash: unchangedHash.ok ? unchangedHash.hash : null,
     }).dirty).toBe(false);
     const sourceAfter = await readPorcelain(source);
     const sourceHeadAfter = await readHead(source);
@@ -107,6 +110,34 @@ describe("dirty worktree backstop", () => {
     expect(sourceHead.ok && sourceHeadAfter.ok && sourceHeadAfter.head).toBe(sourceHead.ok ? sourceHead.head : "");
     expect(sourceAfter.ok && sourceAfter.porcelain).toContain("staged.js");
     expect(sourceAfter.ok && sourceAfter.porcelain).toContain("untracked.js");
+    await removeProposalWorktree(source, created.path);
+  });
+
+  it("treats a rewrite of an already dirty or untracked file as a change", async () => {
+    const source = gitRepo();
+    writeFileSync(path.join(source, "README.md"), "already dirty\n");
+    writeFileSync(path.join(source, "extra.js"), "untracked\n");
+    const created = await createProposalWorktree(source);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const before = await readPorcelain(created.path);
+    writeFileSync(path.join(created.path, "README.md"), "proposal rewrote the dirty file\n");
+    writeFileSync(path.join(created.path, "extra.js"), "proposal rewrote the untracked file\n");
+    const after = await readPorcelain(created.path);
+    const head = await readHead(created.path);
+    const hash = await readWorktreeContentHash(created.path);
+    expect(before.ok && after.ok && after.porcelain).toBe(before.ok ? before.porcelain : "");
+    expect(head.ok && head.head).toBe(created.head);
+    const verdict = proposalChangedIsolation({
+      baselineHead: created.head,
+      baselinePorcelain: created.porcelain,
+      baselineContentHash: created.contentHash,
+      currentHead: head.ok ? head.head : null,
+      current: after,
+      currentContentHash: hash.ok ? hash.hash : null,
+    });
+    expect(verdict.dirty).toBe(true);
+    expect(verdict.error).toContain("file contents");
     await removeProposalWorktree(source, created.path);
   });
 
