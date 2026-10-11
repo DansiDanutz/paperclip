@@ -408,10 +408,19 @@ export function startSlackSocket(input: {
       if (stopped) return;
       const openedSocket = input.WebSocketImpl ? new input.WebSocketImpl(url) : defaultSocket(url);
       socket = openedSocket;
-      attempt = 0;
-      input.onState?.("open");
+      const reconnect = (detail: string) => {
+        if (stopped || socket !== openedSocket) return;
+        // Retire first: close/error callbacks from this socket must not retry again.
+        socket = null;
+        try {
+          openedSocket.close();
+        } finally {
+          retry(detail);
+        }
+      };
       openedSocket.on("message", (data) => {
         void (async () => {
+          if (stopped || socket !== openedSocket) return;
           const raw = rawText(data);
           let envelope: unknown;
           try {
@@ -422,16 +431,25 @@ export function startSlackSocket(input: {
           const id = envelopeId(envelope);
           if (id) openedSocket.send(JSON.stringify({ envelope_id: id }));
           const type = text(asRecord(envelope)?.type);
-          if (type === "hello" || type === "disconnect") return;
+          if (type === "hello") {
+            attempt = 0;
+            input.onState?.("open");
+            return;
+          }
+          if (type === "disconnect") {
+            reconnect(text(asRecord(envelope)?.reason) ?? "Slack requested disconnect");
+            return;
+          }
           await input.onEnvelope(envelope);
         })().catch(() => undefined);
       });
       openedSocket.on("close", () => {
-        if (socket === openedSocket) socket = null;
-        if (!stopped) retry("socket closed");
+        if (stopped || socket !== openedSocket) return;
+        socket = null;
+        retry("socket closed");
       });
       openedSocket.on("error", (error) => {
-        input.onState?.("disconnected", error instanceof Error ? error.message : "socket error");
+        reconnect(error instanceof Error ? error.message : "socket error");
       });
     } catch (error) {
       if (stopped) return;

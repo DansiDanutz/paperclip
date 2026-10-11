@@ -128,7 +128,10 @@ class FakeSocket implements SlackSocketLike {
   sent: string[] = [];
   private handlers: Record<string, Array<(data?: unknown) => void>> = {};
 
-  constructor(readonly url: string) {
+  readonly url: string;
+
+  constructor(url: string) {
+    this.url = url;
     FakeSocket.instances.push(this);
   }
 
@@ -141,8 +144,12 @@ class FakeSocket implements SlackSocketLike {
     this.sent.push(data);
   }
 
+  emit(event: "message" | "close" | "error", data?: unknown) {
+    for (const cb of this.handlers[event] ?? []) cb(data);
+  }
+
   close() {
-    for (const cb of this.handlers.close ?? []) cb();
+    this.emit("close");
   }
 }
 
@@ -181,11 +188,86 @@ describe("slack socket", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(FakeSocket.instances).toHaveLength(1);
     expect(FakeSocket.instances[0]?.url).toBe("wss://example.test/socket");
+    expect(states).not.toContain("open");
+    FakeSocket.instances[0]?.emit("message", JSON.stringify({ type: "hello" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(states).toContain("open");
     socket.stop();
     const opensAfterStop = opens;
     timers.at(-1)?.();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(opens).toBe(opensAfterStop);
+  });
+});
+
+describe("slack socket lifecycle", () => {
+  async function fixture() {
+    FakeSocket.instances = [];
+    const states: string[] = [];
+    const timers: Array<{ ms: number; fn: () => void }> = [];
+    const envelopes: unknown[] = [];
+    const client = startSlackSocket({
+      appToken: "xapp-test",
+      transport: { fetch: async () => new Response(JSON.stringify({ ok: true, url: "wss://example.test/socket" })) },
+      onEnvelope: async (envelope) => { envelopes.push(envelope); },
+      WebSocketImpl: FakeSocket,
+      schedule: (ms, fn) => { timers.push({ ms, fn }); return () => undefined; },
+      onState: (state) => { states.push(state); },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { client, states, timers, envelopes, socket: FakeSocket.instances[0]! };
+  }
+
+  it("waits for hello before reporting a healthy connection", async () => {
+    const f = await fixture();
+    try {
+      expect(f.states).toEqual(["connecting"]);
+      f.socket.emit("message", JSON.stringify({ type: "hello" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(f.states).toEqual(["connecting", "open"]);
+      expect(f.envelopes).toHaveLength(0);
+    } finally { f.client.stop(); }
+  });
+
+  it("refreshes on disconnect and ignores stale socket callbacks", async () => {
+    const f = await fixture();
+    try {
+      f.socket.emit("message", JSON.stringify({ type: "disconnect", reason: "refresh_requested" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(f.timers).toHaveLength(1);
+      f.timers[0]!.fn();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(FakeSocket.instances).toHaveLength(2);
+      f.socket.emit("close");
+      f.socket.emit("error", new Error("old socket"));
+      f.socket.emit("message", JSON.stringify({ envelope_id: "stale", payload: {} }));
+      expect(f.timers).toHaveLength(1);
+      expect(f.socket.sent).toHaveLength(0);
+      const next = FakeSocket.instances[1]!;
+      next.emit("message", JSON.stringify({ type: "hello" }));
+      next.emit("message", JSON.stringify({ envelope_id: "current", payload: { type: "event_callback" } }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(next.sent).toEqual([JSON.stringify({ envelope_id: "current" })]);
+      expect(f.envelopes).toHaveLength(1);
+      expect(f.states.at(-1)).toBe("open");
+    } finally { f.client.stop(); }
+  });
+
+  it("retries socket errors once and retains backoff until hello", async () => {
+    const f = await fixture();
+    try {
+      f.socket.emit("error", new Error("handshake failed"));
+      f.socket.emit("close");
+      expect(f.timers.map((timer) => timer.ms)).toEqual([1000]);
+      f.timers[0]!.fn();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      FakeSocket.instances[1]!.emit("error", new Error("handshake failed again"));
+      expect(f.timers.map((timer) => timer.ms)).toEqual([1000, 2000]);
+      f.timers[1]!.fn();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      FakeSocket.instances[2]!.emit("message", JSON.stringify({ type: "hello" }));
+      FakeSocket.instances[2]!.emit("close");
+      expect(f.timers.map((timer) => timer.ms)).toEqual([1000, 2000, 1000]);
+    } finally { f.client.stop(); }
   });
 });

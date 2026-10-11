@@ -82,7 +82,7 @@ Grok and Kimi report the adapter type `process`. The failed harness is the `harn
 
 A judge or Slack failure is retried three times. The escalation shows `failed` with `failureNote` while it retries, and stays `failed` after the last attempt. `awaiting_approval` is stored only after Slack returns a message timestamp.
 
-Socket Mode uses the `ws` package so it connects on Node 20. A failed `apps.connections.open` is retried, and health is degraded until the socket is open.
+Socket Mode uses the `ws` package so it connects on Node 20. A failed `apps.connections.open` is retried, and health is degraded until Slack sends its `hello` message. Slack disconnect messages and socket errors close the old connection and schedule a new connection. Retry delay grows after failed handshakes and resets after `hello`. Events from a replaced socket are ignored.
 
 | Harness | Command | Adapter settings |
 | --- | --- | --- |
