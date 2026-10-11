@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import {
+  activityLog,
   agents,
   agentRuntimeState,
   agentTaskSessions,
@@ -38,6 +39,7 @@ describeEmbeddedPostgres("agent service clearError", () => {
     await db.delete(heartbeatRunEvents);
     await db.delete(agentTaskSessions);
     await db.delete(agentRuntimeState);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);

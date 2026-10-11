@@ -31,6 +31,7 @@ const nonServerProjects = [
   "@paperclipai/adapter-opencode-local",
   "@paperclipai/plugin-daytona",
   "@paperclipai/plugin-sdk",
+  "@paperclipai/plugin-error-escalation",
   "@paperclipai/create-paperclip-plugin",
   "@paperclipai/ui",
   "paperclipai",
@@ -73,9 +74,21 @@ const generalChatGroupName = "general-chat";
 const chatSuite = "server/src/__tests__/chat-channels.integration.test.ts";
 const generalWorkspacesAGroupName = "general-workspaces-a";
 const generalWorkspacesBGroupName = "general-workspaces-b";
+const generalWorkspacesCGroupName = "general-workspaces-c";
 const generalWorkspacesAProjects = ["@paperclipai/ui", "paperclipai"];
-const generalWorkspacesBProjects = nonServerProjects.filter((project) => !generalWorkspacesAProjects.includes(project));
-const generalGroupNames = [generalServerGroupName, generalWorkspacesAGroupName, generalWorkspacesBGroupName];
+// Upstream PR CI (paperclipai/paperclip pr-trusted.yml@master) runs the db
+// project in its own lane. This branch's workflow file is older, but pr.yml
+// calls that master workflow, so the group has to exist here too.
+const generalWorkspacesCProjects = ["@paperclipai/db"];
+const generalWorkspacesBProjects = nonServerProjects.filter(
+  (project) => !generalWorkspacesAProjects.includes(project) && !generalWorkspacesCProjects.includes(project),
+);
+const generalGroupNames = [
+  generalServerGroupName,
+  generalWorkspacesAGroupName,
+  generalWorkspacesBGroupName,
+  generalWorkspacesCGroupName,
+];
 const allowedGeneralGroupNames = [...generalGroupNames, generalServerWithoutChatGroupName, generalChatGroupName];
 const serializedServerVitestArgs = [
   "--no-file-parallelism",
@@ -412,6 +425,11 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
     return;
   }
 
+  if (groupName === generalWorkspacesCGroupName) {
+    runProjectGroup(generalWorkspacesCProjects, groupName);
+    return;
+  }
+
   fail(`Unknown group "${groupName}".`);
 }
 
@@ -489,7 +507,9 @@ if (options.dryRun) {
             ? generalWorkspacesAProjects
             : options.group === generalWorkspacesBGroupName
               ? generalWorkspacesBProjects
-              : null,
+              : options.group === generalWorkspacesCGroupName
+                ? generalWorkspacesCProjects
+                : null,
         workspacesVitestShard:
           options.group === generalWorkspacesAGroupName &&
           options.shardCount !== null &&

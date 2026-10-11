@@ -349,9 +349,17 @@ import {
 } from "./issue-rewake-throttle.js";
 import {
   logActivity,
+  persistActivity,
   publishPluginDomainEvent,
   type LogActivityInput,
 } from "./activity-log.js";
+import {
+  buildTerminalRunActivityDetails,
+  readRunResultSummary,
+  isEscalationProposalWake,
+  shouldPublishTerminalRunActivity,
+  terminalRunActivityAction,
+} from "./terminal-run-activity.js";
 import {
   buildWorkspaceReadyComment,
   buildWorkspaceReadyMetadata,
@@ -642,6 +650,12 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
 const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
   "environment.lease_acquired",
   "environment.lease_released",
+  // Terminal run rows are lifecycle observations written for plugin listeners.
+  // Counting them as concrete progress would classify a plan-only run as
+  // advanced and skip its one bounded continuation.
+  "agent.run.finished",
+  "agent.run.failed",
+  "agent.run.cancelled",
 ];
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const EXTERNAL_ATTACHMENT_OMISSIONS_KEY = "externalAttachmentOmissions";
@@ -7604,6 +7618,7 @@ export async function buildPaperclipWakePayload(input: {
     input.contextSnapshot[PAPERCLIP_AGENT_MESSAGE_KEY],
   );
   const agentMessageText = sanitizeAgentSessionMessageText(agentMessage.text);
+  const escalationPrompt = readNonEmptyString(input.contextSnapshot.escalationPrompt);
   const issueSummary =
     input.issueSummary ??
     (issueId
@@ -7627,7 +7642,8 @@ export async function buildPaperclipWakePayload(input: {
     commentIds.length === 0 &&
     Object.keys(executionStage).length === 0 &&
     !issueSummary &&
-    !agentMessageText
+    !agentMessageText &&
+    !escalationPrompt
   )
     return null;
 
@@ -8128,6 +8144,10 @@ export async function buildPaperclipWakePayload(input: {
           updatedAt: safeContinuationSummary.updatedAt.toISOString(),
         }
       : null,
+    taskPrompt:
+      escalationPrompt && escalationPrompt !== agentMessageText
+        ? escalationPrompt
+        : null,
     commentIds,
     latestCommentId: commentIds[commentIds.length - 1] ?? null,
     comments,
@@ -9463,7 +9483,7 @@ export function heartbeatService(
             contextSnapshot: { source: effect.contextSource },
           }),
         });
-        publishRunLifecyclePluginEventData(effect);
+        void publishRunLifecycleFromDispatchEffect(effect);
         if (
           isHeartbeatRunTerminalStatus(effect.status) &&
           effect.previousStatus !== effect.status
@@ -9476,6 +9496,38 @@ export function heartbeatService(
         }
       }
     }
+  }
+
+  async function publishRunLifecycleFromDispatchEffect(
+    effect: Extract<PostCommitEffect, { kind: "run_status_published" }>,
+  ) {
+    const row = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.id, effect.runId),
+          eq(heartbeatRuns.companyId, effect.companyId),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (row) {
+      publishRunLifecyclePluginEvent(row, effect.previousStatus);
+      return;
+    }
+    publishRunLifecyclePluginEventData({
+      companyId: effect.companyId,
+      runId: effect.runId,
+      agentId: effect.agentId,
+      status: effect.status,
+      invocationSource: effect.invocationSource,
+      triggerDetail: effect.triggerDetail,
+      error: effect.error,
+      errorCode: effect.errorCode,
+      issueId: effect.issueId,
+      startedAt: effect.startedAt,
+      finishedAt: effect.finishedAt,
+    });
   }
 
   // The wake-queue module's plain snapshots hold only the fields the release
@@ -12669,7 +12721,7 @@ export function heartbeatService(
         type: "heartbeat.run.status",
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
-      publishRunLifecyclePluginEvent(updated);
+      publishRunLifecyclePluginEvent(updated, previousStatus?.status ?? null);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null);
     }
 
@@ -12762,7 +12814,7 @@ export function heartbeatService(
         type: "heartbeat.run.status",
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
-      publishRunLifecyclePluginEvent(updated);
+      publishRunLifecyclePluginEvent(updated, previousStatus?.status ?? null);
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null);
       return { run: updated, updated: true as const };
     }
@@ -12863,19 +12915,108 @@ export function heartbeatService(
 
   function publishRunLifecyclePluginEvent(
     run: typeof heartbeatRuns.$inferSelect,
+    previousStatus?: string | null,
   ) {
-    publishRunLifecyclePluginEventData({
-      companyId: run.companyId,
+    const terminalAction = terminalRunActivityAction(run.status);
+    if (
+      terminalAction &&
+      !shouldPublishTerminalRunActivity(previousStatus, run.status)
+    ) {
+      return;
+    }
+    void emitEnrichedRunLifecyclePluginEvent(run, terminalAction).catch((err) => {
+      logger.warn(
+        { err, runId: run.id },
+        "failed to publish run lifecycle plugin event",
+      );
+    });
+  }
+
+  async function emitEnrichedRunLifecyclePluginEvent(
+    run: typeof heartbeatRuns.$inferSelect,
+    terminalAction: ReturnType<typeof terminalRunActivityAction>,
+  ) {
+    const context = parseObject(run.contextSnapshot);
+    const resultJson = parseObject(run.resultJson);
+    const agentRow = await db
+      .select({ adapterType: agents.adapterType })
+      .from(agents)
+      .where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)))
+      .then((rows) => rows[0] ?? null);
+    const details = buildTerminalRunActivityDetails({
+      runId: run.id,
+      agentId: run.agentId,
+      adapterType: agentRow?.adapterType ?? null,
+      status: run.status,
+      error: run.error,
+      errorCode: run.errorCode,
+      exitCode: run.exitCode ?? null,
+      stdoutExcerpt:
+        (typeof run.stdoutExcerpt === "string" ? run.stdoutExcerpt : null) ??
+        (typeof resultJson.stdout === "string" ? resultJson.stdout : null),
+      stderrExcerpt:
+        (typeof run.stderrExcerpt === "string" ? run.stderrExcerpt : null) ??
+        (typeof resultJson.stderr === "string" ? resultJson.stderr : null),
+      resultSummary: readRunResultSummary(resultJson),
+      contextSnapshot: context,
+    });
+    const eventType =
+      run.status === "running" ? "agent.run.started" : terminalAction;
+    if (!eventType) return;
+    const payload = {
       runId: run.id,
       agentId: run.agentId,
       status: run.status,
       invocationSource: run.invocationSource,
       triggerDetail: run.triggerDetail,
-      error: run.error,
-      errorCode: run.errorCode,
-      issueId: readNonEmptyString(parseObject(run.contextSnapshot).issueId),
-      startedAt: run.startedAt,
-      finishedAt: run.finishedAt,
+      error: run.error ?? null,
+      errorCode: run.errorCode ?? null,
+      issueId: details.issueId,
+      startedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null,
+      finishedAt: run.finishedAt ? new Date(run.finishedAt).toISOString() : null,
+      adapterType: details.adapterType,
+      exitCode: details.exitCode,
+      wakeReason: details.wakeReason,
+      escalationProposal: details.escalationProposal,
+      stdoutExcerpt: details.stdoutExcerpt,
+      stderrExcerpt: details.stderrExcerpt,
+      resultSummary: details.resultSummary,
+      repoUrl: details.repoUrl,
+      repoRef: details.repoRef,
+      branchName: details.branchName,
+      cwd: details.cwd,
+      executionCwd: details.executionCwd,
+      companyId: run.companyId,
+    };
+    if (terminalAction) {
+      const { publication } = await persistActivity(db, {
+        companyId: run.companyId,
+        actorType: "agent",
+        actorId: run.agentId,
+        agentId: run.agentId,
+        runId: run.id,
+        action: terminalAction,
+        entityType: "heartbeat_run",
+        entityId: run.id,
+        issueId: details.issueId,
+        details: payload,
+      });
+      publishLiveEvent({
+        companyId: publication.companyId,
+        type: "activity.logged",
+        payload: publication.payload,
+      });
+    }
+    publishPluginDomainEvent({
+      eventId: randomUUID(),
+      eventType,
+      occurredAt: new Date().toISOString(),
+      actorId: run.agentId,
+      actorType: "agent",
+      entityId: run.id,
+      entityType: "heartbeat_run",
+      companyId: run.companyId,
+      payload,
     });
   }
 
@@ -16840,6 +16981,7 @@ export function heartbeatService(
       }
     }
     let terminal: typeof heartbeatRuns.$inferSelect | null = null;
+    let previousChatControlStatus: string | null = null;
     try {
       const attempt = () => db.transaction(async (tx) => {
         terminal = null;
@@ -16885,6 +17027,7 @@ export function heartbeatService(
           current.status !== (stage === "claim" ? "queued" : "running")
         )
           return null;
+        previousChatControlStatus = current.status;
         const admission = readChatControlRecoveryAdmission(current);
         const expectedAdmission = readChatControlRecoveryAdmission(run);
         const admissionLost =
@@ -17025,7 +17168,7 @@ export function heartbeatService(
             error: settled.error,
           },
         });
-        publishRunLifecyclePluginEvent(settled);
+        publishRunLifecyclePluginEvent(settled, previousChatControlStatus);
         if (stage === "dispatch")
           await finalizeAgentStatus(settled.agentId, "cancelled");
       }
@@ -17511,7 +17654,7 @@ export function heartbeatService(
             : null,
         },
       });
-      publishRunLifecyclePluginEvent(queuedCommentClaim.run);
+      publishRunLifecyclePluginEvent(queuedCommentClaim.run, "queued");
       // Fire-and-forget: nothing else in this path depends on the emission,
       // so it must not delay the return.
       void emitAgentTaskRun(db, queuedCommentClaim.run);
@@ -17560,7 +17703,7 @@ export function heartbeatService(
           : null,
       },
     });
-    publishRunLifecyclePluginEvent(claimed);
+    publishRunLifecyclePluginEvent(claimed, "queued");
 
     await setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
 
@@ -21301,11 +21444,12 @@ export function heartbeatService(
           agentId: agent.id,
         },
       );
-      const {
-        executionWorkspace,
-        reusedExecutionWorkspace,
-        policy: resolvedWorkspaceReusePolicy,
-      } = await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
+      const escalationCwd = isEscalationProposalWake(context)
+        ? readNonEmptyString(context.escalationCwd)
+        : null;
+      const provisionedExecutionWorkspace = escalationCwd
+        ? null
+        : await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
         {
           requestedShouldReuseExisting,
           existingExecutionWorkspaceId:
@@ -21403,6 +21547,25 @@ export function heartbeatService(
             }),
         },
       );
+      const executionWorkspace: RealizedExecutionWorkspace =
+        provisionedExecutionWorkspace?.executionWorkspace ?? {
+          ...executionWorkspaceBase,
+          strategy: "git_worktree",
+          cwd: escalationCwd as string,
+          branchName: null,
+          worktreePath: escalationCwd,
+          warnings: [],
+          created: false,
+          branchCreatedByRuntime: false,
+        };
+      const reusedExecutionWorkspace =
+        provisionedExecutionWorkspace?.reusedExecutionWorkspace ?? null;
+      const resolvedWorkspaceReusePolicy =
+        provisionedExecutionWorkspace?.policy ?? {
+          shouldRestoreExistingWorkspace: false,
+          shouldRefreshWorkspaceConfigSnapshot: false,
+          shouldPersistLatestWorkspaceConfigMetadata: false,
+        };
       const resolvedProjectId =
         executionWorkspace.projectId ??
         issueRef?.projectId ??
@@ -21547,8 +21710,9 @@ export function heartbeatService(
         pendingForwardBranchReconcile?.recordedBranchName ??
         executionWorkspace.branchName;
       try {
-        persistedExecutionWorkspace =
-          resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
+        persistedExecutionWorkspace = escalationCwd
+          ? null
+          : resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
           reusableExistingExecutionWorkspace
             ? await executionWorkspacesSvc.update(
                 reusableExistingExecutionWorkspace.id,
@@ -21849,8 +22013,9 @@ export function heartbeatService(
         ...activeEnvironmentLease,
         lease: realizationResult.lease,
       };
-      persistedExecutionWorkspace =
-        realizationResult.persistedExecutionWorkspace;
+      persistedExecutionWorkspace = escalationCwd
+        ? null
+        : realizationResult.persistedExecutionWorkspace;
       // A sandbox realization may materialize or replace the durable workspace
       // after the host-side provisioning boundary above. Bind that final ID to
       // the issue before dispatch so warm turns reuse the exact same workspace
@@ -22081,6 +22246,7 @@ export function heartbeatService(
             ]
           : []),
       ];
+      const priorPaperclipWorkspace = parseObject(context.paperclipWorkspace);
       context.paperclipWorkspace = {
         cwd: executionWorkspace.cwd,
         source: executionWorkspace.source,
@@ -22088,9 +22254,15 @@ export function heartbeatService(
         strategy: executionWorkspace.strategy,
         projectId: executionWorkspace.projectId,
         workspaceId: executionWorkspace.workspaceId,
-        repoUrl: executionWorkspace.repoUrl,
-        repoRef: executionWorkspace.repoRef,
-        branchName: executionWorkspace.branchName,
+        repoUrl:
+          executionWorkspace.repoUrl ??
+          readNonEmptyString(priorPaperclipWorkspace.repoUrl),
+        repoRef:
+          executionWorkspace.repoRef ??
+          readNonEmptyString(priorPaperclipWorkspace.repoRef),
+        branchName:
+          executionWorkspace.branchName ??
+          readNonEmptyString(priorPaperclipWorkspace.branchName),
         worktreePath: executionWorkspace.worktreePath,
         realization: workspaceRealization,
         agentHome: await (async () => {
@@ -22585,6 +22757,20 @@ export function heartbeatService(
           }
         }
         const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
+          if (
+            isEscalationProposalWake(context) &&
+            typeof meta.cwd === "string" &&
+            meta.cwd.trim().length > 0
+          ) {
+            context.paperclipExecutionCwd = meta.cwd.trim();
+            await db
+              .update(heartbeatRuns)
+              .set({
+                contextSnapshot: context,
+                updatedAt: new Date(),
+              })
+              .where(eq(heartbeatRuns.id, run.id));
+          }
           if (meta.env && secretKeys.size > 0) {
             for (const key of secretKeys) {
               if (key in meta.env) meta.env[key] = "***REDACTED***";
@@ -23912,6 +24098,9 @@ export function heartbeatService(
               await dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
                   legacyAdapterEntered = true;
+                  if (escalationCwd) {
+                    runtimeConfig = { ...runtimeConfig, cwd: escalationCwd };
+                  }
                   return adapter.execute({
                     runId: run.id,
                     agent,

@@ -4,6 +4,7 @@ import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -194,6 +195,7 @@ describeEmbeddedPostgres("issue blocker diagnostics route", () => {
 
   afterEach(async () => {
     await db.delete(issueRelations);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(agents);

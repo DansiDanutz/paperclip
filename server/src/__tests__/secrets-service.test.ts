@@ -169,6 +169,7 @@ describeEmbeddedPostgres("secretService", () => {
     await db.delete(userSecretDefinitions);
     await db.delete(companySecretProviderConfigs);
     await db.delete(companyMemberships);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);

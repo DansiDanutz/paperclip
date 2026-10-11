@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import {
+  activityLog,
   agents,
   companies,
   companySkills,
@@ -62,6 +63,7 @@ describeEmbeddedPostgres("feedbackService.saveIssueVote", () => {
     await db.delete(documents);
     await db.delete(issueComments);
     await db.delete(costEvents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(companySkills);
     await db.delete(issues);

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   costEvents,
@@ -53,6 +54,7 @@ describeEmbeddedPostgres("issueService.remove referential integrity", () => {
     // finance_events references cost_events, so delete finance rows first.
     await db.delete(financeEvents);
     await db.delete(costEvents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(goals);

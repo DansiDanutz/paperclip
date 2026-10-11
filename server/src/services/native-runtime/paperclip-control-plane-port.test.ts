@@ -273,6 +273,7 @@ describe("PaperclipControlPlanePort conformance", () => {
       await db.delete(issueWorkProducts);
       await db.delete(issueRelations);
       await db.delete(heartbeatRunEvents);
+      await db.delete(activityLog);
       await db.delete(heartbeatRuns);
       await db.delete(completionContracts);
       await db.delete(issues);

@@ -570,6 +570,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     await db.delete(companySecrets);
     await db.delete(userSecretDefinitions);
     await db.delete(issueThreadInteractions);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(projects);

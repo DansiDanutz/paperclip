@@ -54,6 +54,7 @@ import {
   REPO_ROOT,
 } from "../services/plugin-loader.js";
 import { logActivity } from "../services/activity-log.js";
+import { resolvePluginBridgeCompanyScope } from "../services/plugin-bridge-scope.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
@@ -723,6 +724,18 @@ export function pluginRoutes(
         entityId,
         details,
       })));
+  }
+
+  function readPluginBridgeCompanyScope(
+    res: Response,
+    body: { companyId?: unknown; params?: Record<string, unknown> | null } | null | undefined,
+  ) {
+    const scope = resolvePluginBridgeCompanyScope(body);
+    if (!scope.ok) {
+      res.status(403).json({ error: scope.error });
+      return null;
+    }
+    return scope;
   }
 
   function assertPluginBridgeScope(req: Request, companyId: unknown): string | undefined {
@@ -1434,7 +1447,9 @@ export function pluginRoutes(
       return;
     }
 
-    const companyId = assertPluginBridgeScope(req, body.companyId);
+    const scope = readPluginBridgeCompanyScope(res, body);
+    if (!scope) return;
+    const companyId = assertPluginBridgeScope(req, scope.companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1443,7 +1458,7 @@ export function pluginRoutes(
         {
           key: body.key,
           ...(companyId ? { companyId } : {}),
-          params: body.params ?? {},
+          params: scope.params,
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -1527,7 +1542,9 @@ export function pluginRoutes(
       return;
     }
 
-    const companyId = assertPluginBridgeScope(req, body.companyId);
+    const scope = readPluginBridgeCompanyScope(res, body);
+    if (!scope) return;
+    const companyId = assertPluginBridgeScope(req, scope.companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1535,7 +1552,7 @@ export function pluginRoutes(
         "performAction",
         {
           key: body.key,
-          params: actionParamsWithAuthorizedCompanyScope(body.params, companyId),
+          params: actionParamsWithAuthorizedCompanyScope(scope.params, companyId),
           actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body.renderEnvironment ?? null,
         },
@@ -1621,7 +1638,9 @@ export function pluginRoutes(
       renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
     } | undefined;
 
-    const companyId = assertPluginBridgeScope(req, body?.companyId);
+    const scope = readPluginBridgeCompanyScope(res, body);
+    if (!scope) return;
+    const companyId = assertPluginBridgeScope(req, scope.companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1630,7 +1649,7 @@ export function pluginRoutes(
         {
           key,
           ...(companyId ? { companyId } : {}),
-          params: body?.params ?? {},
+          params: scope.params,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );
@@ -1711,7 +1730,9 @@ export function pluginRoutes(
       renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
     } | undefined;
 
-    const companyId = assertPluginBridgeScope(req, body?.companyId);
+    const scope = readPluginBridgeCompanyScope(res, body);
+    if (!scope) return;
+    const companyId = assertPluginBridgeScope(req, scope.companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1719,7 +1740,7 @@ export function pluginRoutes(
         "performAction",
         {
           key,
-          params: actionParamsWithAuthorizedCompanyScope(body?.params, companyId),
+          params: actionParamsWithAuthorizedCompanyScope(scope.params, companyId),
           actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body?.renderEnvironment ?? null,
         },

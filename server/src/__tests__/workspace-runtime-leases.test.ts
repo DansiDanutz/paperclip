@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -47,6 +48,7 @@ describeEmbeddedPostgres("execution workspace runtime leases", () => {
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projects);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);

@@ -52,6 +52,7 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(companySkills);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(routines);

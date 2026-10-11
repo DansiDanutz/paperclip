@@ -76,6 +76,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     await db.delete(documentRevisions);
     await db.delete(companySecretVersions);
     await db.delete(companySecrets);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);

@@ -62,6 +62,7 @@ async function deleteHeartbeatRunsAfterEvents(db: ReturnType<typeof createDb>) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     await db.delete(heartbeatRunEvents);
     try {
+      await db.delete(activityLog);
       await db.delete(heartbeatRuns);
       return;
     } catch (error) {

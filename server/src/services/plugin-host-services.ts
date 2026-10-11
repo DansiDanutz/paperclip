@@ -38,6 +38,7 @@ import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
 import { heartbeatService } from "./heartbeat.js";
+import { buildPluginAgentInvokeWake } from "./plugin-agent-invoke.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { approvalService } from "./approvals.js";
@@ -2811,13 +2812,20 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
+        const wake = buildPluginAgentInvokeWake({
+          prompt: params.prompt,
+          reason: params.reason,
+          issueId: params.issueId,
+          taskKey: params.taskKey,
+          escalationCwd: params.escalationCwd,
+        });
         const run = await heartbeat.wakeup(params.agentId, {
           source: "automation",
           triggerDetail: "system",
           reason: params.reason ?? null,
-          payload: { prompt: params.prompt },
+          payload: wake.payload,
           contextSnapshot: {
-            wakeReason: params.reason ?? null,
+            ...wake.contextSnapshot,
             paperclipAgentMessage: {
               text: params.prompt,
               source: "plugin_invoke",

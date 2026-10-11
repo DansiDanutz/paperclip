@@ -1665,7 +1665,17 @@ export interface PluginAgentsClient {
   /** Resume a paused agent (sets status to idle). Throws if terminated, pending_approval, or not found. Requires `agents.resume`. */
   resume(agentId: string, companyId: string): Promise<Agent>;
   /** Invoke (wake up) an agent with a prompt payload. Throws if paused, terminated, pending_approval, or not found. Requires `agents.invoke`. */
-  invoke(agentId: string, companyId: string, opts: { prompt: string; reason?: string }): Promise<{ runId: string }>;
+  invoke(
+    agentId: string,
+    companyId: string,
+    opts: {
+      prompt: string;
+      reason?: string;
+      issueId?: string;
+      taskKey?: string;
+      escalationCwd?: string;
+    },
+  ): Promise<{ runId: string }>;
   /** Resolve and reconcile manifest-declared plugin-managed agents by stable key. Requires `agents.managed`. */
   managed: {
     get(agentKey: string, companyId: string): Promise<PluginManagedAgentResolution>;
@@ -2230,4 +2240,12 @@ export interface PluginContext {
   /** Tracer for provider spans. The default is a no-op; the host records a span
    * only when tracing is on and an active host trace context is present. */
   tracer: PluginTracer;
+
+  /**
+   * Run a callback outside the host invocation that is currently on the stack.
+   * Socket Mode listeners and timers must use this. A callback created inside
+   * `configChanged` otherwise keeps sending that call's id after the host has
+   * retired it, and company-scoped reads then fail.
+   */
+  runOutsideInvocation<T>(fn: () => T): T;
 }

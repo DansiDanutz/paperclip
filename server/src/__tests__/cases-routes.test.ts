@@ -104,6 +104,7 @@ describeEmbeddedPostgres("cases routes", () => {
     await db.delete(assets);
     await db.delete(labels);
     await db.delete(issues);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(projects);
     await db.delete(agents);

@@ -108,6 +108,7 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     await db.delete(routineRuns);
     await db.delete(routineTriggers);
     await db.delete(heartbeatRunEvents);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issues);

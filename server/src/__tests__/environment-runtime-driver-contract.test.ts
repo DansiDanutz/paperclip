@@ -12,6 +12,7 @@ import {
   type SshEnvironmentConfig,
 } from "@paperclipai/adapter-utils/ssh";
 import {
+  activityLog,
   agents,
   companies,
   companySecretVersions,
@@ -69,6 +70,7 @@ describeEmbeddedPostgres("environment runtime driver contract", () => {
       await rm(root, { recursive: true, force: true }).catch(() => undefined);
     }
     await db.delete(environmentLeases);
+    await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(environments);
