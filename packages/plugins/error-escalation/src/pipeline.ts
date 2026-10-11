@@ -452,6 +452,7 @@ async function deliver(ctx: PluginContext, companyId: string, id: string, deps: 
 }
 
 async function finalize(ctx: PluginContext, companyId: string, id: string, deps: PipelineDeps): Promise<void> {
+  if (fanoutOpen.has(id)) return;
   const next = await updateRecord(ctx, companyId, id, (record) => {
     if (record.proposals.some((proposal) => proposal.status === "pending")) return false;
     if (record.status !== "fanning_out") return false;
@@ -678,14 +679,20 @@ async function recoverMissingSlots(
   record: EscalationRecord,
   deps: PipelineDeps,
 ): Promise<void> {
-  if (!fanoutIncomplete(record) || fanoutOpen.has(record.id)) return;
-  const started = new Set(record.proposals.map((proposal) => proposal.adapterType));
-  const missing = record.candidates.filter((harness) => !started.has(harness));
-  if (missing.length === 0) return;
-  const config = await loadConfig(ctx);
+  // Claim before any await. A nested completion during invoke must return
+  // immediately; waiting here deadlocks the caller that holds the claim.
+  // Two overlapping events otherwise both pass the check, wait on config,
+  // and append the same harness twice.
+  if (fanoutOpen.has(record.id)) return;
   fanoutOpen.add(record.id);
   try {
-    await runProposalSlots(ctx, record, missing, activityFromRecord(record), config, deps);
+    const fresh = await loadEscalation(ctx, record.companyId, record.id);
+    if (!fresh || !fanoutIncomplete(fresh)) return;
+    const started = new Set(fresh.proposals.map((proposal) => proposal.adapterType));
+    const missing = fresh.candidates.filter((harness) => !started.has(harness));
+    if (missing.length === 0) return;
+    const config = await loadConfig(ctx);
+    await runProposalSlots(ctx, fresh, missing, activityFromRecord(fresh), config, deps);
   } finally {
     fanoutOpen.delete(record.id);
   }

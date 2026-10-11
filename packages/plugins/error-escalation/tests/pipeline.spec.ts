@@ -1121,6 +1121,25 @@ describe("error escalation pipeline", () => {
     expect(saved?.proposals.every((proposal) => proposal.status === "pending")).toBe(true);
   });
 
+  it("starts each missing slot once when two recoveries overlap", async () => {
+    const { harness, invokes } = await setup();
+    const record = stuckFanout([]);
+    await saveEscalation(harness.ctx, record);
+    await rememberPendingDelivery(harness.ctx, COMPANY_ID, record.id, true);
+    await Promise.all([
+      resumeEscalations(harness.ctx),
+      resumeEscalations(harness.ctx),
+    ]);
+    const saved = await currentEscalation(harness);
+    expect(invokes).toHaveLength(2);
+    expect(saved?.proposals).toHaveLength(2);
+    expect(new Set(saved?.proposals.map((proposal) => proposal.adapterType))).toEqual(
+      new Set(["codex_local", "grok_build"]),
+    );
+    expect(saved?.status).toBe("fanning_out");
+    expect(saved?.judge).toBeNull();
+  });
+
   it("keeps going when invoke fails and worktree cleanup also throws", async () => {
     let removals = 0;
     const { harness, invokes } = await setup(baseConfig(), {
